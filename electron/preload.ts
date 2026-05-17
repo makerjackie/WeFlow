@@ -195,7 +195,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSessionStatuses: (usernames: string[]) => ipcRenderer.invoke('chat:getSessionStatuses', usernames),
     getExportTabCounts: () => ipcRenderer.invoke('chat:getExportTabCounts'),
     getContactTypeCounts: () => ipcRenderer.invoke('chat:getContactTypeCounts'),
-    getSessionMessageCounts: (sessionIds: string[]) => ipcRenderer.invoke('chat:getSessionMessageCounts', sessionIds),
+    getSessionMessageCounts: (sessionIds: string[], options?: { preferHintCache?: boolean; bypassSessionCache?: boolean }) => ipcRenderer.invoke('chat:getSessionMessageCounts', sessionIds, options),
     enrichSessionsContactInfo: (
       usernames: string[],
       options?: { skipDisplayName?: boolean; onlyMissingAvatar?: boolean }

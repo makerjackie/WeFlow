@@ -4364,7 +4364,7 @@ function ExportPage() {
     try {
       if (prioritizedSessionIds.length > 0) {
         patchSessionLoadTraceStage(prioritizedSessionIds, 'messageCount', 'loading')
-        const priorityResult = await window.electronAPI.chat.getSessionMessageCounts(prioritizedSessionIds)
+        const priorityResult = await window.electronAPI.chat.getSessionMessageCounts(prioritizedSessionIds, { bypassSessionCache: true, preferHintCache: false })
         if (isStale()) return { ...accumulatedCounts }
         if (priorityResult.success) {
           applyCounts(priorityResult.counts)
@@ -4381,7 +4381,7 @@ function ExportPage() {
 
       if (remainingSessionIds.length > 0) {
         patchSessionLoadTraceStage(remainingSessionIds, 'messageCount', 'loading')
-        const remainingResult = await window.electronAPI.chat.getSessionMessageCounts(remainingSessionIds)
+        const remainingResult = await window.electronAPI.chat.getSessionMessageCounts(remainingSessionIds, { bypassSessionCache: true, preferHintCache: false })
         if (isStale()) return { ...accumulatedCounts }
         if (remainingResult.success) {
           applyCounts(remainingResult.counts)
@@ -7613,11 +7613,28 @@ function ExportPage() {
       scheduleSessionMutualFriendsWorker()
     }
 
+    // 记录刷新前的会话时间戳
+    const oldTimestamps = new Map(
+      sessionsRef.current.map(s => [s.username, s.lastTimestamp || s.sortTimestamp || 0])
+    )
+
     await Promise.all([
       loadContactsList({ scopeKey }),
       loadSnsStats({ full: true }),
       loadSnsUserPostCounts({ force: true })
     ])
+
+    // 找出有变动的会话（最后消息时间变化）
+    const changedSessions = sessionsRef.current.filter(session => {
+      const oldTs = oldTimestamps.get(session.username) || 0
+      const newTs = session.lastTimestamp || session.sortTimestamp || 0
+      return newTs > oldTs
+    })
+
+    // 只对有变动的会话重新加载消息数量
+    if (changedSessions.length > 0) {
+      await loadSessionMessageCounts(changedSessions, activeTabRef.current, { scopeKey })
+    }
 
     const currentDetailSessionId = showSessionDetailPanel
       ? String(sessionDetail?.wxid || '').trim()

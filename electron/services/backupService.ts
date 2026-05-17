@@ -460,6 +460,7 @@ export class BackupService {
     const dbStorage = join(accountDir, 'db_storage')
     if (!existsSync(dbStorage)) return { success: false, error: '未找到 db_storage 目录' }
 
+    const accountDirName = basename(accountDir)
     const opened = await withTimeout(
       wcdbService.open(accountDir, decryptKey),
       15000,

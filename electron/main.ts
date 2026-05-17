@@ -2349,8 +2349,8 @@ function registerIpcHandlers() {
     return chatService.getContactTypeCounts()
   })
 
-  ipcMain.handle('chat:getSessionMessageCounts', async (_, sessionIds: string[]) => {
-    return chatService.getSessionMessageCounts(sessionIds)
+  ipcMain.handle('chat:getSessionMessageCounts', async (_, sessionIds: string[], options?: { preferHintCache?: boolean; bypassSessionCache?: boolean }) => {
+    return chatService.getSessionMessageCounts(sessionIds, options)
   })
 
   ipcMain.handle('chat:enrichSessionsContactInfo', async (_, usernames: string[], options?: {
@@ -3213,7 +3213,8 @@ function registerIpcHandlers() {
             imageAesKey: imageKeys.aesKey,
             resourcesPath,
             userDataPath,
-            logEnabled
+            logEnabled,
+            isPackaged: app.isPackaged
           }
         })
 
@@ -3344,7 +3345,8 @@ function registerIpcHandlers() {
             imageAesKey: imageKeys.aesKey,
             resourcesPath: app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources'),
             userDataPath: app.getPath('userData'),
-            logEnabled: cfg.get('logEnabled')
+            logEnabled: cfg.get('logEnabled'),
+            isPackaged: app.isPackaged
           }
         })
 
@@ -3411,7 +3413,8 @@ function registerIpcHandlers() {
             myWxid: String(cfg.getMyWxidCleaned() || '').trim(),
             resourcesPath: app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources'),
             userDataPath: app.getPath('userData'),
-            logEnabled: cfg.get('logEnabled')
+            logEnabled: cfg.get('logEnabled'),
+            isPackaged: app.isPackaged
           }
         })
 

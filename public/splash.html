@@ -205,6 +205,16 @@
       background-clip: text;
     }
 
+    /* 对应字母的脉冲流光动画 */
+    .letter.pulse-active .letter-fill-content {
+      background: linear-gradient(90deg, var(--gold-start) 0%, var(--gold-mid) 35%, #ffffff 50%, var(--gold-mid) 65%, var(--gold-end) 100%);
+      background-size: 200% 100%;
+      animation: gold-flow 2s infinite linear;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
     /* 字母等待/停顿状态：优雅的微光呼吸与轻微悬浮动画 */
     .brand-letters.waiting .letter {
       animation: letter-waiting-breath 2.5s ease-in-out infinite;
@@ -401,6 +411,7 @@
   <script>
     var themeModeQuery = null;
     var systemModeQuery = null;
+    var loadingTimeout = null;
 
     function resolveMode(mode) {
       if (mode === "dark" || mode === "light") return mode;
@@ -448,6 +459,18 @@
       var lettersContainer = document.getElementById("brandLetters");
       var metadataLeft = document.querySelector(".metadata-left");
       var safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+
+      // 每次更新进度，清除之前的等待定时器
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout);
+        loadingTimeout = null;
+      }
+
+      // 移除所有字母的脉冲动画类
+      var letters = document.querySelectorAll("#brandLetters .letter");
+      letters.forEach(function(letter) {
+        letter.classList.remove("pulse-active");
+      });
 
       if (fill) {
         if (waiting) {
@@ -506,7 +529,6 @@
       }
 
       // Smooth letter-by-letter filling
-      var letters = document.querySelectorAll("#brandLetters .letter");
       if (letters.length > 0) {
         var charProgress = (safePercent / 100) * letters.length;
         letters.forEach(function(letter, index) {
@@ -516,6 +538,29 @@
             wrapper.style.width = (fillRatio * 100) + "%";
           }
         });
+      }
+
+      // 如果当前不是 waiting 状态，且进度未达到 100%，则启动 0.5s 定时器
+      if (!waiting && safePercent < 100) {
+        loadingTimeout = setTimeout(function() {
+          if (fill) {
+            fill.classList.add("indeterminate");
+            fill.style.width = "100%";
+            if (dot) dot.style.display = "none";
+          }
+          
+          if (letters.length > 0) {
+            var charProgress = (safePercent / 100) * letters.length;
+            var activeIndex = Math.min(letters.length - 1, Math.floor(charProgress));
+            if (activeIndex >= 0 && activeIndex < letters.length) {
+              letters[activeIndex].classList.add("pulse-active");
+              var wrapper = letters[activeIndex].querySelector(".letter-fill-wrapper");
+              if (wrapper) {
+                wrapper.style.width = "100%";
+              }
+            }
+          }
+        }, 500);
       }
     }
 

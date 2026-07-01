@@ -120,6 +120,7 @@ function ExportPage() {
     resumeTask: resumeBgTask,
     cancelTask: cancelBgTask
   } = useBackgroundTasks()
+  const taskCenterBackgroundTasks = backgroundTasks.filter(task => task.sourcePage === 'export' || task.sourcePage === 'chat')
 
   // ── 4. Dialog & Exports ──
   const { dialogState, openDialog, closeDialog } = useExportDialog()
@@ -286,13 +287,13 @@ function ExportPage() {
           />
         </section>
 
-        {(exportTasks.length > 0 || backgroundTasks.filter(t => t.sourcePage === 'export').length > 0) && (
+        {(exportTasks.length > 0 || taskCenterBackgroundTasks.length > 0) && (
           <section className="export-v2-task-panel">
             <TaskCenter
               exportTasks={exportTasks}
               onCancelExportTask={cancelExportTask}
               onClearCompletedExportTasks={clearCompletedExportTasks}
-              backgroundTasks={backgroundTasks.filter(t => t.sourcePage === 'export')}
+              backgroundTasks={taskCenterBackgroundTasks}
               onPauseBackgroundTask={pauseBgTask}
               onResumeBackgroundTask={resumeBgTask}
               onCancelBackgroundTask={cancelBgTask}

@@ -4560,7 +4560,11 @@
 }
 
 // 批量转写按钮
-.batch-transcribe-btn {
+.batch-transcribe-btn,
+.batch-decrypt-btn {
+  position: relative;
+  overflow: visible;
+
   &:hover:not(:disabled) {
     color: var(--primary);
   }
@@ -4569,6 +4573,26 @@
     color: var(--primary);
     cursor: pointer;
     opacity: 1 !important;
+  }
+
+  .batch-progress-badge {
+    position: absolute;
+    right: -7px;
+    bottom: -5px;
+    min-width: 22px;
+    height: 15px;
+    padding: 0 4px;
+    border-radius: 999px;
+    border: 1px solid var(--bg-primary);
+    background: var(--primary);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 14px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
   }
 }
 

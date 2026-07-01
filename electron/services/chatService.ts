@@ -4600,6 +4600,14 @@ class ChatService {
           const localType = this.getRowInt(row, ['local_type'], 1)
           if (!fileLocalTypeSet.has(localType)) continue
 
+          // 文件消息变体中，49 是通用 appmsg，需要解析 XML 判断 type === 6；
+          // 34359738417 / 103079215153 / 25769803825 等变体几乎专用于文件，直接计数即可，
+          // 避免大量 CPU 密集型 XML 解码/正则解析。
+          if (localType !== 49) {
+            count += 1
+            continue
+          }
+
           const rawMessageContent = row.message_content
           const rawCompressContent = row.compress_content
           const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
@@ -4664,16 +4672,22 @@ class ChatService {
           if (localType === 50) stats.callMessages += 1
           if (localType === 8589934592049) stats.transferMessages += 1
           if (localType === 8594229559345) stats.redPacketMessages += 1
-          // 文件、转账、红包等共享 appmsg 类型的 localType 变体，需要解析 XML 进一步区分
+          // 文件、转账、红包等共享 appmsg 类型的 localType 变体，需要解析 XML 进一步区分。
+          // 非 49 的文件消息变体（34359738417 / 103079215153 / 25769803825）几乎专用于文件，
+          // 跳过 XML 解析直接计为文件消息，以降低 cursor 扫描开销。
           if (FILE_APP_LOCAL_TYPE_SET.has(localType)) {
-            const rawMessageContent = row.message_content
-            const rawCompressContent = row.compress_content
-            const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
-            const xmlType = this.extractType49XmlTypeForStats(content)
-            if (xmlType === '2000') stats.transferMessages += 1
-            if (xmlType === '2001') stats.redPacketMessages += 1
-            // appmsg type === 6 表示普通文件附件
-            if (xmlType === '6') stats.fileMessages += 1
+            if (localType !== 49) {
+              stats.fileMessages += 1
+            } else {
+              const rawMessageContent = row.message_content
+              const rawCompressContent = row.compress_content
+              const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
+              const xmlType = this.extractType49XmlTypeForStats(content)
+              if (xmlType === '2000') stats.transferMessages += 1
+              if (xmlType === '2001') stats.redPacketMessages += 1
+              // appmsg type === 6 表示普通文件附件
+              if (xmlType === '6') stats.fileMessages += 1
+            }
           }
 
           const createTime = this.getRowInt(
@@ -5095,7 +5109,7 @@ class ChatService {
       }
     }
 
-    await this.forEachWithConcurrency(normalizedSessionIds, 3, async (sessionId) => {
+    await this.forEachWithConcurrency(normalizedSessionIds, 6, async (sessionId) => {
       try {
         const fromNativeBatch = hasNativeBatchStats && nativeBatchStats[sessionId]
         const stats = fromNativeBatch

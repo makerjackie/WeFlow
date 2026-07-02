@@ -71,6 +71,212 @@ let configService: ConfigService | null = null
 const activeExportWorkers = new Map<string, Worker>()
 const activeExportTasks = new Set<string>()
 
+type ResourceDiagnosticsEntry = {
+  ts: number
+  payload: Record<string, unknown>
+}
+
+const resourceDiagnosticsEntries: ResourceDiagnosticsEntry[] = []
+const maxResourceDiagnosticsEntries = 240
+let resourceDiagnosticsPreloadTotalsBaseline: Record<string, number> | null = null
+
+const sanitizeResourceDiagnosticsPayload = (payload: unknown): Record<string, unknown> => {
+  if (!payload || typeof payload !== 'object') return {}
+  try {
+    const serialized = JSON.stringify(payload)
+    if (serialized.length > 24_000) {
+      return {
+        truncated: true,
+        size: serialized.length
+      }
+    }
+    return JSON.parse(serialized)
+  } catch {
+    return { unserializable: true }
+  }
+}
+
+const getRecordValue = (value: unknown, key: string): unknown => {
+  if (!value || typeof value !== 'object') return undefined
+  return (value as Record<string, unknown>)[key]
+}
+
+const getNumericRecordValue = (value: unknown, path: string[]): number => {
+  let current: unknown = value
+  for (const key of path) {
+    current = getRecordValue(current, key)
+  }
+  const numeric = Number(current)
+  return Number.isFinite(numeric) ? numeric : 0
+}
+
+const summarizeResourceDiagnostics = (
+  entries: ResourceDiagnosticsEntry[],
+  preloadTotalsBaseline: Record<string, number> | null = resourceDiagnosticsPreloadTotalsBaseline
+): Record<string, unknown> => {
+  const counterDeltas: Record<string, number> = {}
+  const preloadTotalDeltas: Record<string, number> = {}
+  let longFrames = 0
+  let maxRecentFrameMs = 0
+  let maxQueued = 0
+  let maxQueuedCache = 0
+  let maxQueuedDecrypt = 0
+  let maxQueuedHigh = 0
+  let maxQueuedNormal = 0
+  let maxQueuedLow = 0
+  let maxActiveCache = 0
+  let maxActiveDecrypt = 0
+  let maxPending = 0
+  let maxHighWaterQueued = 0
+  let maxHighWaterQueuedDecrypt = 0
+  let maxHighWaterQueuedLow = 0
+  let maxHighWaterActiveDecrypt = 0
+  let mediaStreamMaxLoadMs = 0
+
+  for (const entry of entries) {
+    const payload = entry.payload
+    longFrames += getNumericRecordValue(payload, ['frameDelta', 'longFrames'])
+    maxRecentFrameMs = Math.max(maxRecentFrameMs, getNumericRecordValue(payload, ['frameDelta', 'recentMaxFrameMs']))
+    maxQueued = Math.max(maxQueued, getNumericRecordValue(payload, ['preloadStats', 'queued']))
+    maxQueuedCache = Math.max(maxQueuedCache, getNumericRecordValue(payload, ['preloadStats', 'queuedCache']))
+    maxQueuedDecrypt = Math.max(maxQueuedDecrypt, getNumericRecordValue(payload, ['preloadStats', 'queuedDecrypt']))
+    maxQueuedHigh = Math.max(maxQueuedHigh, getNumericRecordValue(payload, ['preloadStats', 'queuedHigh']))
+    maxQueuedNormal = Math.max(maxQueuedNormal, getNumericRecordValue(payload, ['preloadStats', 'queuedNormal']))
+    maxQueuedLow = Math.max(maxQueuedLow, getNumericRecordValue(payload, ['preloadStats', 'queuedLow']))
+    maxActiveCache = Math.max(maxActiveCache, getNumericRecordValue(payload, ['preloadStats', 'activeCache']))
+    maxActiveDecrypt = Math.max(maxActiveDecrypt, getNumericRecordValue(payload, ['preloadStats', 'activeDecrypt']))
+    maxPending = Math.max(maxPending, getNumericRecordValue(payload, ['preloadStats', 'pending']))
+    maxHighWaterQueued = Math.max(maxHighWaterQueued, getNumericRecordValue(payload, ['preloadStats', 'highWater', 'queued']))
+    maxHighWaterQueuedDecrypt = Math.max(maxHighWaterQueuedDecrypt, getNumericRecordValue(payload, ['preloadStats', 'highWater', 'queuedDecrypt']))
+    maxHighWaterQueuedLow = Math.max(maxHighWaterQueuedLow, getNumericRecordValue(payload, ['preloadStats', 'highWater', 'queuedLow']))
+    maxHighWaterActiveDecrypt = Math.max(maxHighWaterActiveDecrypt, getNumericRecordValue(payload, ['preloadStats', 'highWater', 'activeDecrypt']))
+    mediaStreamMaxLoadMs = Math.max(
+      mediaStreamMaxLoadMs,
+      getNumericRecordValue(payload, ['counters', 'mediaStreamMaxLoadMs']),
+      getNumericRecordValue(payload, ['delta', 'mediaStreamMaxLoadMs'])
+    )
+
+    const delta = getRecordValue(payload, 'delta')
+    if (delta && typeof delta === 'object') {
+      for (const [key, value] of Object.entries(delta as Record<string, unknown>)) {
+        const numeric = Number(value)
+        if (!Number.isFinite(numeric)) continue
+        counterDeltas[key] = (counterDeltas[key] || 0) + numeric
+      }
+    }
+  }
+
+  const lastTotals = getRecordValue(getRecordValue(entries[entries.length - 1]?.payload, 'preloadStats'), 'totals')
+  const firstTotals = preloadTotalsBaseline || getRecordValue(getRecordValue(entries[0]?.payload, 'preloadStats'), 'totals')
+  if (firstTotals && typeof firstTotals === 'object' && lastTotals && typeof lastTotals === 'object') {
+    const keys = new Set([
+      ...Object.keys(firstTotals as Record<string, unknown>),
+      ...Object.keys(lastTotals as Record<string, unknown>)
+    ])
+    for (const key of keys) {
+      const first = Number((firstTotals as Record<string, unknown>)[key])
+      const last = Number((lastTotals as Record<string, unknown>)[key])
+      if (!Number.isFinite(first) || !Number.isFinite(last)) continue
+      preloadTotalDeltas[key] = last - first
+    }
+  }
+
+  const mediaStreamLoadSamples = counterDeltas.mediaStreamLoadSamples || 0
+  const mediaStreamLoadMsTotal = counterDeltas.mediaStreamLoadMsTotal || 0
+  const mediaStreamPageCacheHits = counterDeltas.mediaStreamPageCacheHits || 0
+  const mediaStreamInflightMerges = counterDeltas.mediaStreamInflightMerges || 0
+  const mediaStreamAvoidedNativeLoads = mediaStreamPageCacheHits + mediaStreamInflightMerges
+  const mediaStreamNativeLoads = counterDeltas.mediaStreamNativeLoads || 0
+  const mediaStreamRowsLoaded = counterDeltas.mediaStreamRowsLoaded || 0
+  const mediaStreamDuplicateRows = counterDeltas.mediaStreamDuplicateRows || 0
+  const mediaStreamNoProgressStops = counterDeltas.mediaStreamNoProgressStops || 0
+  const preloadAccepted = preloadTotalDeltas.accepted || 0
+  const preloadMergedQueued = preloadTotalDeltas.mergedQueued || 0
+  const preloadSkippedActive = preloadTotalDeltas.skippedActive || 0
+  const preloadSkippedPending = preloadTotalDeltas.skippedPending || 0
+  const preloadDeduped = preloadMergedQueued + preloadSkippedActive + preloadSkippedPending
+  const preloadHandled = preloadAccepted + preloadDeduped
+  const preloadCanceledActive = preloadTotalDeltas.canceledActive || 0
+  const preloadDroppedQueued = preloadTotalDeltas.droppedQueued || 0
+  const preloadDeferredLowPriority = preloadTotalDeltas.deferredLowPriority || 0
+  const preloadLowPriorityIdleDeferrals = preloadTotalDeltas.lowPriorityIdleDeferrals || 0
+  const preloadActiveCacheSnapshots = preloadTotalDeltas.activeCacheSnapshots || 0
+  const preloadActiveCacheSnapshotSkipped = preloadTotalDeltas.activeCacheSnapshotSkipped || 0
+  const preloadActiveCacheSnapshotCanceled = preloadTotalDeltas.activeCacheSnapshotCanceled || 0
+  const preloadLowPriorityRejected = preloadTotalDeltas.lowPriorityRejected || 0
+  const imagePreloadRejectedCapacity = counterDeltas.imagePreloadRejectedCapacity || 0
+  const imagePredecryptRequests = counterDeltas.imagePredecryptRequests || 0
+  const imagePredecryptBackpressureSkips = counterDeltas.imagePredecryptBackpressureSkips || 0
+  const imagePredecryptRejectedCapacity = counterDeltas.imagePredecryptRejectedCapacity || 0
+  const imagePredecryptDeferred = counterDeltas.imagePredecryptDeferred || 0
+  const imagePredecryptPreviewUpgrades = counterDeltas.imagePredecryptPreviewUpgrades || 0
+  const predecryptHiddenSkips = counterDeltas.predecryptHiddenSkips || 0
+  const rangeHiddenSkips = counterDeltas.rangeHiddenSkips || 0
+  const rangeDuplicateSkips = counterDeltas.rangeDuplicateSkips || 0
+  const rangeVisibilityReschedules = counterDeltas.rangeVisibilityReschedules || 0
+  const transientStatePruneRuns = counterDeltas.transientStatePruneRuns || 0
+
+  return {
+    samples: entries.length,
+    longFrames,
+    maxRecentFrameMs,
+    maxQueued,
+    maxQueuedCache,
+    maxQueuedDecrypt,
+    maxQueuedHigh,
+    maxQueuedNormal,
+    maxQueuedLow,
+    maxPending,
+    maxActiveCache,
+    maxActiveDecrypt,
+    maxHighWaterQueued,
+    maxHighWaterQueuedDecrypt,
+    maxHighWaterQueuedLow,
+    maxHighWaterActiveDecrypt,
+    mediaStreamLoadSamples,
+    mediaStreamAvgLoadMs: mediaStreamLoadSamples > 0 ? mediaStreamLoadMsTotal / mediaStreamLoadSamples : 0,
+    mediaStreamMaxLoadMs,
+    mediaStreamNativeLoads,
+    mediaStreamPageCacheHits,
+    mediaStreamInflightMerges,
+    mediaStreamAvoidedNativeLoads,
+    mediaStreamAvoidedNativeRate: mediaStreamLoadSamples > 0 ? mediaStreamAvoidedNativeLoads / mediaStreamLoadSamples : 0,
+    mediaStreamPageCacheHitRate: mediaStreamLoadSamples > 0 ? mediaStreamPageCacheHits / mediaStreamLoadSamples : 0,
+    mediaStreamRowsLoaded,
+    mediaStreamDuplicateRows,
+    mediaStreamDuplicateRate: mediaStreamRowsLoaded > 0 ? mediaStreamDuplicateRows / mediaStreamRowsLoaded : 0,
+    mediaStreamNoProgressStops,
+    preloadAccepted,
+    preloadDeduped,
+    preloadHandled,
+    preloadDedupRate: preloadHandled > 0 ? preloadDeduped / preloadHandled : 0,
+    preloadCanceledActive,
+    preloadDroppedQueued,
+    preloadDeferredLowPriority,
+    preloadLowPriorityIdleDeferrals,
+    preloadActiveCacheSnapshots,
+    preloadActiveCacheSnapshotSkipped,
+    preloadActiveCacheSnapshotCanceled,
+    preloadLowPriorityRejected,
+    imagePreloadRejectedCapacity,
+    imagePredecryptRequests,
+    imagePredecryptBackpressureSkips,
+    imagePredecryptRejectedCapacity,
+    imagePredecryptDeferred,
+    imagePredecryptPreviewUpgrades,
+    imagePredecryptRejectRate: imagePredecryptRequests > 0 ? imagePredecryptRejectedCapacity / imagePredecryptRequests : 0,
+    imagePredecryptBackpressureRate: imagePredecryptRequests > 0 ? imagePredecryptBackpressureSkips / imagePredecryptRequests : 0,
+    predecryptHiddenSkips,
+    rangeHiddenSkips,
+    rangeDuplicateSkips,
+    rangeVisibilityReschedules,
+    transientStatePruneRuns,
+    preloadTotalsBaselineCaptured: Boolean(preloadTotalsBaseline),
+    counterDeltas,
+    preloadTotalDeltas
+  }
+}
+
 const normalizeExportTaskId = (taskId: unknown): string => String(taskId || '').trim()
 const ALLOWED_EXTERNAL_URL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
 
@@ -2062,6 +2268,47 @@ function registerIpcHandlers() {
     return { success: true }
   })
 
+  ipcMain.handle('diagnostics:recordResourceStats', async (_, payload?: unknown) => {
+    resourceDiagnosticsEntries.push({
+      ts: Date.now(),
+      payload: sanitizeResourceDiagnosticsPayload(payload)
+    })
+    while (resourceDiagnosticsEntries.length > maxResourceDiagnosticsEntries) {
+      resourceDiagnosticsEntries.shift()
+    }
+    return { success: true, count: resourceDiagnosticsEntries.length }
+  })
+
+  ipcMain.handle('diagnostics:getResourceStats', async (_, options?: { limit?: number }) => {
+    const limit = Math.max(1, Math.min(500, Number(options?.limit || maxResourceDiagnosticsEntries)))
+    const entries = resourceDiagnosticsEntries.slice(-limit)
+    return {
+      entries,
+      summary: {
+        count: resourceDiagnosticsEntries.length,
+        firstTs: resourceDiagnosticsEntries[0]?.ts || 0,
+        lastTs: resourceDiagnosticsEntries[resourceDiagnosticsEntries.length - 1]?.ts || 0,
+        ...summarizeResourceDiagnostics(entries, resourceDiagnosticsPreloadTotalsBaseline)
+      }
+    }
+  })
+
+  ipcMain.handle('diagnostics:clearResourceStats', async () => {
+    resourceDiagnosticsEntries.length = 0
+    try {
+      const stats = imagePreloadService.getStats()
+      const totals = stats?.totals || {}
+      resourceDiagnosticsPreloadTotalsBaseline = Object.fromEntries(
+        Object.entries(totals)
+          .map(([key, value]) => [key, Number(value)])
+          .filter(([, value]) => Number.isFinite(value))
+      )
+    } catch {
+      resourceDiagnosticsPreloadTotalsBaseline = null
+    }
+    return { success: true }
+  })
+
   ipcMain.handle('diagnostics:exportExportCardLogs', async (_, payload?: {
     filePath?: string
     frontendLogs?: unknown[]
@@ -2367,6 +2614,23 @@ function registerIpcHandlers() {
       return { success: true, ...result }
     } catch (e) {
       return { success: false, error: String(e), exists: false }
+    }
+  })
+
+  ipcMain.handle('video:getVideoInfoBatch', async (_, videoMd5List?: string[], options?: { includePoster?: boolean; posterFormat?: 'dataUrl' | 'fileUrl' }) => {
+    try {
+      const rows = await videoService.getVideoInfoBatch(Array.isArray(videoMd5List) ? videoMd5List : [], options)
+      return {
+        success: true,
+        rows: rows.map((row) => ({
+          index: row.index,
+          md5: row.md5,
+          success: true,
+          ...row.info
+        }))
+      }
+    } catch (e) {
+      return { success: false, rows: [], error: String(e) }
     }
   })
 
@@ -3043,6 +3307,8 @@ function registerIpcHandlers() {
     hardlinkOnly?: boolean
     disableUpdateCheck?: boolean
     allowCacheIndex?: boolean
+    allowCachePromotion?: boolean
+    allowFilesystemScan?: boolean
     suppressEvents?: boolean
   }) => {
     return imageDecryptService.resolveCachedImage(payload)
@@ -3060,15 +3326,37 @@ function registerIpcHandlers() {
         hardlinkOnly?: boolean
         suppressEvents?: boolean
       }>,
-      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
+      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; allowCachePromotion?: boolean; allowFilesystemScan?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => {
       const list = Array.isArray(payloads) ? payloads : []
       if (list.length === 0) return { success: true, rows: [] }
+      if (options?.hardlinkOnly === true && options?.allowFilesystemScan === false) {
+        const hardlinkMd5s = new Set<string>()
+        for (const payload of list) {
+          const imageMd5 = String(payload?.imageMd5 || '').trim().toLowerCase()
+          if (/^[a-f0-9]{32}$/i.test(imageMd5)) {
+            hardlinkMd5s.add(imageMd5)
+            continue
+          }
+          const imageDatName = String(payload?.imageDatName || '').trim().toLowerCase()
+          const datBase = imageDatName.endsWith('.dat') ? imageDatName.slice(0, -4) : imageDatName
+          if (/^[a-f0-9]{32}$/i.test(datBase)) {
+            hardlinkMd5s.add(datBase)
+          }
+        }
+        if (hardlinkMd5s.size > 0) {
+          await imageDecryptService.preloadImageHardlinkMd5s(Array.from(hardlinkMd5s), {
+            chunkSize: 64,
+            yieldMs: 0,
+            filesystemFallback: false
+          })
+        }
+      }
 
-      const maxConcurrentRaw = Number(process.env.WEFLOW_IMAGE_RESOLVE_BATCH_CONCURRENCY || 10)
+      const maxConcurrentRaw = Number(process.env.WEFLOW_IMAGE_RESOLVE_BATCH_CONCURRENCY || 3)
       const maxConcurrent = Number.isFinite(maxConcurrentRaw)
-        ? Math.max(1, Math.min(Math.floor(maxConcurrentRaw), 48))
-        : 10
+        ? Math.max(1, Math.min(Math.floor(maxConcurrentRaw), 12))
+        : 3
       const workerCount = Math.min(maxConcurrent, list.length)
 
       const rows: Array<{ success: boolean; localPath?: string; hasUpdate?: boolean; error?: string }> = new Array(list.length)
@@ -3083,8 +3371,9 @@ function registerIpcHandlers() {
         const preferFilePath = payload.preferFilePath ?? options?.preferFilePath === true
         const hardlinkOnly = payload.hardlinkOnly ?? options?.hardlinkOnly === true
         const allowCacheIndex = options?.allowCacheIndex !== false
+        const allowCachePromotion = options?.allowCachePromotion !== false
+        const allowFilesystemScan = options?.allowFilesystemScan !== false
         const disableUpdateCheck = options?.disableUpdateCheck === true
-        const suppressEvents = payload.suppressEvents ?? options?.suppressEvents === true
         return [
           sessionId,
           imageMd5,
@@ -3093,8 +3382,9 @@ function registerIpcHandlers() {
           preferFilePath ? 'pf1' : 'pf0',
           hardlinkOnly ? 'hl1' : 'hl0',
           allowCacheIndex ? 'ci1' : 'ci0',
-          disableUpdateCheck ? 'du1' : 'du0',
-          suppressEvents ? 'se1' : 'se0'
+          allowCachePromotion ? 'cp1' : 'cp0',
+          allowFilesystemScan ? 'fs1' : 'fs0',
+          disableUpdateCheck ? 'du1' : 'du0'
         ].join('|')
       }
 
@@ -3104,6 +3394,8 @@ function registerIpcHandlers() {
         hardlinkOnly: payload.hardlinkOnly ?? options?.hardlinkOnly === true,
         disableUpdateCheck: options?.disableUpdateCheck === true,
         allowCacheIndex: options?.allowCacheIndex !== false,
+        allowCachePromotion: options?.allowCachePromotion !== false,
+        allowFilesystemScan: options?.allowFilesystemScan !== false,
         suppressEvents: payload.suppressEvents ?? options?.suppressEvents === true
       })
 
@@ -3137,15 +3429,25 @@ function registerIpcHandlers() {
     async (
       _,
       payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
-      options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
+      options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean; allowFilesystemScan?: boolean; emitResolved?: boolean; scope?: string; priority?: 'high' | 'normal' | 'low' }
     ) => {
-    imagePreloadService.enqueue(payloads || [], options)
-    return true
-  })
+      return imagePreloadService.enqueue(payloads || [], options)
+    })
+  ipcMain.handle(
+    'image:cancelPreloadScope',
+    async (_, scope?: string) => {
+      imagePreloadService.cancelScope(String(scope || ''))
+      return true
+    }
+  )
+  ipcMain.handle(
+    'image:getPreloadStats',
+    async () => imagePreloadService.getStats()
+  )
   ipcMain.handle(
     'image:preloadHardlinkMd5s',
-    async (_, md5List?: string[]) => {
-      await imageDecryptService.preloadImageHardlinkMd5s(Array.isArray(md5List) ? md5List : [])
+    async (_, md5List?: string[], options?: { chunkSize?: number; yieldMs?: number; filesystemFallback?: boolean }) => {
+      await imageDecryptService.preloadImageHardlinkMd5s(Array.isArray(md5List) ? md5List : [], options)
       return true
     }
   )

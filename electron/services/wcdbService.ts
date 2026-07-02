@@ -308,6 +308,12 @@ export class WcdbService {
     }>
     hasMore?: boolean
     nextOffset?: number
+    streamSource?: 'native' | 'pageCache' | 'inflight'
+    pageCacheHit?: boolean
+    inflightMerged?: boolean
+    nativeLimit?: number
+    nativeRows?: number
+    elapsedMs?: number
     error?: string
   }> {
     return this.callWorker('getMediaStream', { options })

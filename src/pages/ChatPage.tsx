@@ -1613,6 +1613,7 @@ function ChatPage(props: ChatPageProps) {
   const {
     isBatchTranscribing,
     runningBatchVoiceTaskType,
+    batchVoiceProgress,
     startTranscribe,
     updateProgress,
     updateTranscribeTaskStatus,
@@ -1620,6 +1621,7 @@ function ChatPage(props: ChatPageProps) {
   } = useBatchTranscribeStore(useShallow((state) => ({
     isBatchTranscribing: state.isBatchTranscribing,
     runningBatchVoiceTaskType: state.taskType,
+    batchVoiceProgress: state.progress,
     startTranscribe: state.startTranscribe,
     updateProgress: state.updateProgress,
     updateTranscribeTaskStatus: state.setTaskStatus,
@@ -1627,12 +1629,14 @@ function ChatPage(props: ChatPageProps) {
   })))
   const {
     isBatchDecrypting,
+    batchImageDecryptProgress,
     startDecrypt,
     updateDecryptProgress,
     updateDecryptTaskStatus,
     finishDecrypt
   } = useBatchImageDecryptStore(useShallow((state) => ({
     isBatchDecrypting: state.isBatchDecrypting,
+    batchImageDecryptProgress: state.progress,
     startDecrypt: state.startDecrypt,
     updateDecryptProgress: state.updateProgress,
     updateDecryptTaskStatus: state.setTaskStatus,
@@ -7747,7 +7751,9 @@ function ChatPage(props: ChatPageProps) {
                 isPreparingExportDialog={isPreparingExportDialog}
                 isBatchTranscribing={isBatchTranscribing}
                 runningBatchVoiceTaskType={runningBatchVoiceTaskType}
+                batchVoiceProgress={batchVoiceProgress}
                 isBatchDecrypting={isBatchDecrypting}
+                batchImageDecryptProgress={batchImageDecryptProgress}
                 isTriggeringSessionInsight={isTriggeringSessionInsight}
                 isRefreshingMessages={isRefreshingMessages}
                 isLoadingMessages={isLoadingMessages}

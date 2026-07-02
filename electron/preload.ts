@@ -96,6 +96,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('diagnostics:getExportCardLogs', options),
     clearExportCardLogs: () =>
       ipcRenderer.invoke('diagnostics:clearExportCardLogs'),
+    recordResourceStats: (payload: any) =>
+      ipcRenderer.invoke('diagnostics:recordResourceStats', payload),
+    getResourceStats: (options?: { limit?: number }) =>
+      ipcRenderer.invoke('diagnostics:getResourceStats', options),
+    clearResourceStats: () =>
+      ipcRenderer.invoke('diagnostics:clearResourceStats'),
     exportExportCardLogs: (payload: { filePath: string; frontendLogs?: unknown[] }) =>
       ipcRenderer.invoke('diagnostics:exportExportCardLogs', payload)
   },
@@ -327,6 +333,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       hardlinkOnly?: boolean
       disableUpdateCheck?: boolean
       allowCacheIndex?: boolean
+      allowFilesystemScan?: boolean
       suppressEvents?: boolean
     }) =>
       ipcRenderer.invoke('image:decrypt', payload),
@@ -339,26 +346,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
       hardlinkOnly?: boolean
       disableUpdateCheck?: boolean
       allowCacheIndex?: boolean
+      allowCachePromotion?: boolean
+      allowFilesystemScan?: boolean
       suppressEvents?: boolean
     }) =>
       ipcRenderer.invoke('image:resolveCache', payload),
     resolveCacheBatch: (
       payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
-      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
+      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; allowCachePromotion?: boolean; allowFilesystemScan?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => ipcRenderer.invoke('image:resolveCacheBatch', payloads, options),
     preload: (
       payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
-      options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
+      options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean; allowFilesystemScan?: boolean; emitResolved?: boolean; scope?: string; priority?: 'high' | 'normal' | 'low' }
     ) => ipcRenderer.invoke('image:preload', payloads, options),
-    preloadHardlinkMd5s: (md5List: string[]) =>
-      ipcRenderer.invoke('image:preloadHardlinkMd5s', md5List),
-    onUpdateAvailable: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => void) => {
-      const listener = (_: unknown, payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => callback(payload)
+    cancelPreloadScope: (scope: string) =>
+      ipcRenderer.invoke('image:cancelPreloadScope', scope),
+    getPreloadStats: () =>
+      ipcRenderer.invoke('image:getPreloadStats'),
+    preloadHardlinkMd5s: (md5List: string[], options?: { chunkSize?: number; yieldMs?: number; filesystemFallback?: boolean }) =>
+      ipcRenderer.invoke('image:preloadHardlinkMd5s', md5List, options),
+    onUpdateAvailable: (callback: (payload: { cacheKey: string; sessionId?: string; createTime?: number; imageMd5?: string; imageDatName?: string }) => void) => {
+      const listener = (_: unknown, payload: { cacheKey: string; sessionId?: string; createTime?: number; imageMd5?: string; imageDatName?: string }) => callback(payload)
       ipcRenderer.on('image:updateAvailable', listener)
       return () => ipcRenderer.removeListener('image:updateAvailable', listener)
     },
-    onCacheResolved: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string; localPath: string }) => void) => {
-      const listener = (_: unknown, payload: { cacheKey: string; imageMd5?: string; imageDatName?: string; localPath: string }) => callback(payload)
+    onCacheResolved: (callback: (payload: { cacheKey: string; sessionId?: string; createTime?: number; imageMd5?: string; imageDatName?: string; localPath: string }) => void) => {
+      const listener = (_: unknown, payload: { cacheKey: string; sessionId?: string; createTime?: number; imageMd5?: string; imageDatName?: string; localPath: string }) => callback(payload)
       ipcRenderer.on('image:cacheResolved', listener)
       return () => ipcRenderer.removeListener('image:cacheResolved', listener)
     },
@@ -391,6 +404,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 视频
   video: {
     getVideoInfo: (videoMd5: string, options?: { includePoster?: boolean; posterFormat?: 'dataUrl' | 'fileUrl' }) => ipcRenderer.invoke('video:getVideoInfo', videoMd5, options),
+    getVideoInfoBatch: (videoMd5List: string[], options?: { includePoster?: boolean; posterFormat?: 'dataUrl' | 'fileUrl' }) =>
+      ipcRenderer.invoke('video:getVideoInfoBatch', videoMd5List, options),
     parseVideoMd5: (content: string) => ipcRenderer.invoke('video:parseVideoMd5', content)
   },
 

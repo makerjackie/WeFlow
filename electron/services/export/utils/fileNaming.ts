@@ -21,6 +21,13 @@ export function normalizeFileNamingMode(value: unknown): 'classic' | 'date-range
   return String(value || '').trim().toLowerCase() === 'date-range' ? 'date-range' : 'classic'
 }
 
+export function normalizeExportConflictStrategy(value: unknown): 'incremental' | 'overwrite' | 'rename' {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'overwrite') return 'overwrite'
+  if (normalized === 'rename') return 'rename'
+  return 'incremental'
+}
+
 export function formatDateTokenBySeconds(seconds?: number): string | null {
   const normalizedSeconds = normalizeTimestampSeconds(seconds)
   if (normalizedSeconds <= 0) return null

@@ -326,7 +326,7 @@
           }
         }
 
-        .file-size-limit, .concurrency-control, .path-style-control {
+        .file-size-limit, .concurrency-control, .path-style-control, .conflict-strategy-control {
           margin-top: 16px;
           display: flex;
           align-items: center;
@@ -354,7 +354,7 @@
           }
         }
 
-        .path-style-control {
+        .path-style-control, .conflict-strategy-control {
           flex: 1 1 100%;
           margin-top: 4px;
 
@@ -362,7 +362,7 @@
             flex: 0 0 auto;
           }
 
-          .path-style-segmented {
+          .path-style-segmented, .conflict-strategy-segmented {
             display: inline-flex;
             min-height: 34px;
             padding: 3px;

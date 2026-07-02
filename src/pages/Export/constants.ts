@@ -7,6 +7,7 @@ import type {
   ContentType,
   ConversationTab,
   DisplayNamePreference,
+  ExportConflictStrategy,
   TextExportFormat,
   TaskProgress,
   ContactsSortConfig
@@ -45,6 +46,7 @@ export const formatOptions: Array<{ value: TextExportFormat; label: string; desc
   { value: 'json', label: 'JSON', desc: '详细格式，包含完整消息信息' },
   { value: 'arkme-json', label: 'Arkme JSON', desc: '紧凑 JSON，支持 sender 去重与关系统计' },
   { value: 'html', label: 'HTML', desc: '网页格式，可直接浏览' },
+  { value: 'markdown', label: 'Markdown', desc: '支持文本、图片与链接，适合 AI 场景' },
   { value: 'txt', label: 'TXT', desc: '纯文本，通用格式' },
   { value: 'excel', label: 'Excel', desc: '电子表格，适合统计分析' },
   { value: 'weclone', label: 'WeClone CSV', desc: 'WeClone 兼容字段格式（CSV）' },
@@ -57,6 +59,12 @@ export const displayNameOptions: Array<{ value: DisplayNamePreference; label: st
   { value: 'group-nickname', label: '群昵称优先', desc: '仅群聊有效，私聊显示备注/昵称' },
   { value: 'remark', label: '备注优先', desc: '有备注显示备注，否则显示昵称' },
   { value: 'nickname', label: '微信昵称', desc: '始终显示微信昵称' }
+]
+
+export const conflictStrategyOptions: Array<{ value: ExportConflictStrategy; label: string; desc: string }> = [
+  { value: 'incremental', label: '增量跳过', desc: '复用已有同名媒体；聊天文件有变化时更新原文件' },
+  { value: 'overwrite', label: '全量覆盖', desc: '同名文件直接替换，适合强制刷新导出结果' },
+  { value: 'rename', label: '保留副本', desc: '同名导出追加序号，保留旧版本' }
 ]
 
 // ─── Write layout options ────────────────────────────────────
@@ -163,10 +171,12 @@ export const createDefaultExportOptions = (): import('./types').ExportOptions =>
   maxFileSizeMb: 200,
   exportVoiceAsText: false,
   exportPathStyle: 'auto',
+  exportConflictStrategy: 'incremental',
   excelCompactColumns: true,
   txtColumns: defaultTxtColumns,
   displayNamePreference: 'remark',
-  exportConcurrency: 2
+  exportConcurrency: 2,
+  fileNamingMode: 'classic'
 })
 
 // ─── Empty progress factory ──────────────────────────────────

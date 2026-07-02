@@ -144,6 +144,7 @@ export class TxtFormatter {
               exportFiles: options.exportFiles,
               maxFileSizeMb: options.maxFileSizeMb,
               exportVoiceAsText: options.exportVoiceAsText,
+              exportConflictStrategy: options.exportConflictStrategy,
               includeVideoPoster: options.format === 'html',
               dirCache: mediaDirCache,
               control

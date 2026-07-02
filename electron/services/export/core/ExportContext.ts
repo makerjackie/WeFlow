@@ -20,7 +20,7 @@ import { EXPORT_HTML_STYLES } from '../../exportHtmlStyles'
 import { LRUCache } from '../../../utils/LRUCache.js'
 import { normalizeTimestampSeconds, formatTimestamp, formatIsoTimestamp, parseCompactDateTimeDigitsToSeconds, parseDateTimeTextToSeconds, normalizeExportDateRange, normalizeRowTimestampSeconds, getTimestampSecondsFromRow } from '../../export/utils/timestamp';
 import { escapeHtml, escapeAttribute, renderMultilineText, decodeHtmlEntities } from '../../export/utils/htmlEscape';
-import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeFileNamingMode, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath } from '../../export/utils/fileNaming';
+import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeFileNamingMode, normalizeExportConflictStrategy, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath } from '../../export/utils/fileNaming';
 import { extractXmlValue, extractXmlAttribute, extractAppMessageType, normalizeAppMessageContent } from '../../export/parsers/xmlExtractor';
 import { decodeMessageContent, decodeMaybeCompressed, decodeBinaryContent, looksLikeHex, looksLikeBase64 } from '../../export/parsers/contentDecoder';
 import { parseVoipMessage } from '../../export/parsers/voipParser';
@@ -177,17 +177,24 @@ export class ExportContext {
         const normalizedDateRange = normalizeExportDateRange(options.dateRange);
         const normalizedMaxFileSizeMb = this.normalizeMaxFileSizeMb(options.maxFileSizeMb);
         const normalizedWriteLayout = this.resolveExportWriteLayout(options);
-        const exportMedia = options.exportMedia === true;
+        const mediaContentType = this.getMediaContentType(options);
+        const exportMedia = options.exportMedia === true || this.isMediaOptionSelected(options) || mediaContentType !== null;
+        const resolveMediaOption = (key: keyof Pick<ExportOptions, 'exportImages' | 'exportVoices' | 'exportVideos' | 'exportEmojis' | 'exportFiles'>, type: MediaContentType): boolean | undefined => {
+          if (mediaContentType) return mediaContentType === type
+          return exportMedia ? options[key] !== false : options[key]
+        }
         return {
           ...options,
           dateRange: normalizedDateRange,
           maxFileSizeMb: normalizedMaxFileSizeMb,
+          exportConflictStrategy: this.resolveExportConflictStrategy(options),
           exportWriteLayout: normalizedWriteLayout,
-          exportImages: exportMedia ? options.exportImages !== false : options.exportImages,
-          exportVoices: exportMedia ? options.exportVoices !== false : options.exportVoices,
-          exportVideos: exportMedia ? options.exportVideos !== false : options.exportVideos,
-          exportEmojis: exportMedia ? options.exportEmojis !== false : options.exportEmojis,
-          exportFiles: exportMedia ? options.exportFiles !== false : options.exportFiles
+          exportMedia,
+          exportImages: resolveMediaOption('exportImages', 'image'),
+          exportVoices: resolveMediaOption('exportVoices', 'voice'),
+          exportVideos: resolveMediaOption('exportVideos', 'video'),
+          exportEmojis: resolveMediaOption('exportEmojis', 'emoji'),
+          exportFiles: resolveMediaOption('exportFiles', 'file')
         }
     }
 
@@ -198,6 +205,14 @@ export class ExportContext {
         return rawWriteLayout === 'A' || rawWriteLayout === 'B' || rawWriteLayout === 'C'
         ? rawWriteLayout
         : 'B'
+    }
+
+    public resolveExportConflictStrategy(options?: Pick<ExportOptions, 'exportConflictStrategy'> | null): 'incremental' | 'overwrite' | 'rename' {
+        return normalizeExportConflictStrategy(options?.exportConflictStrategy)
+    }
+
+    public shouldReuseExistingExportFile(options?: Pick<ExportOptions, 'exportConflictStrategy'> | null): boolean {
+        return this.resolveExportConflictStrategy(options) === 'incremental'
     }
 
     public resolveExportPathStyle(options?: Pick<ExportOptions, 'exportPathStyle'> | null): 'posix' | 'windows' {
@@ -521,8 +536,15 @@ export class ExportContext {
         return code === 'EXDEV' || code === 'EPERM' || code === 'EACCES' || code === 'EINVAL' || code === 'ENOSYS' || code === 'ENOTSUP'
     }
 
-    private async copyMediaWithCacheAndDedup(kind: 'image' | 'video' | 'emoji', sourcePath: string, destPath: string, control?: ExportTaskControl): Promise<{ success: boolean; code?: string }> {
+    private async copyMediaWithCacheAndDedup(kind: 'image' | 'video' | 'emoji', sourcePath: string, destPath: string, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<{ success: boolean; code?: string }> {
         const existedBeforeCopy = await pathExists(destPath);
+        if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
+          this.noteMediaTelemetry({
+            doneFiles: 1,
+            dedupReuseFiles: 1
+          })
+          return { success: true }
+        }
         const resolved = await this.resolvePreferredMediaSource(kind, sourcePath);
         if (resolved.cacheHit) {
           this.noteMediaTelemetry({ cacheHitFiles: 1 })
@@ -649,9 +671,12 @@ export class ExportContext {
         }
     }
 
-    private isMediaExportEnabled(options: ExportOptions): boolean {
-        return options.exportMedia === true &&
-        Boolean(options.exportImages || options.exportVoices || options.exportVideos || options.exportEmojis || options.exportFiles)
+    private isMediaOptionSelected(options: Pick<ExportOptions, 'exportImages' | 'exportVoices' | 'exportVideos' | 'exportEmojis' | 'exportFiles'>): boolean {
+        return Boolean(options.exportImages || options.exportVoices || options.exportVideos || options.exportEmojis || options.exportFiles)
+    }
+
+    public isMediaExportEnabled(options: ExportOptions): boolean {
+        return this.getMediaContentType(options) !== null || this.isMediaOptionSelected(options)
     }
 
     public isUnboundedDateRange(dateRange?: { start: number; end: number } | null): boolean {
@@ -2706,6 +2731,46 @@ export class ExportContext {
     /**
      * 导出媒体文件到指定目录
      */
+    private resolveWeliveMediaPath(msg: any): string {
+        const nestedMedia = msg?.media && typeof msg.media === 'object' ? msg.media : null
+        const candidates = [
+          msg?.mediaPath,
+          msg?.media_path,
+          msg?.videoPath,
+          msg?.video_path,
+          msg?.imagePath,
+          msg?.image_path,
+          msg?.voicePath,
+          msg?.voice_path,
+          msg?.filePath,
+          msg?.file_path,
+          msg?.localPath,
+          msg?.local_path,
+          msg?.sourcePath,
+          msg?.source_path,
+          msg?.fullPath,
+          msg?.full_path,
+          msg?.absolutePath,
+          msg?.absolute_path,
+          nestedMedia?.path,
+          nestedMedia?.mediaPath,
+          nestedMedia?.media_path,
+          nestedMedia?.videoPath,
+          nestedMedia?.video_path,
+          nestedMedia?.localPath,
+          nestedMedia?.local_path,
+          nestedMedia?.filePath,
+          nestedMedia?.file_path
+        ]
+
+        for (const candidate of candidates) {
+          const value = String(candidate || '').trim()
+          if (value) return value
+        }
+
+        return ''
+    }
+
     public async exportMediaForMessage(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, options: {
           exportImages?: boolean
           exportVoices?: boolean
@@ -2714,13 +2779,14 @@ export class ExportContext {
           exportFiles?: boolean
           maxFileSizeMb?: number
           exportVoiceAsText?: boolean
+          exportConflictStrategy?: ExportOptions['exportConflictStrategy']
           includeVideoPoster?: boolean
           includeVoiceWithTranscript?: boolean
           dirCache?: Set<string>
           control?: ExportTaskControl
         }): Promise<MediaExportItem | null> {
         const localType = msg.localType;
-        const weliveMediaPath = String(msg?.mediaPath || msg?.media_path || '').trim()
+        const weliveMediaPath = this.resolveWeliveMediaPath(msg)
         if (weliveMediaPath) {
           const adopted = await this.adoptWeliveExportedMedia(msg, weliveMediaPath, mediaRootDir, mediaRelativePrefix, {
             exportImages: options.exportImages,
@@ -2729,6 +2795,7 @@ export class ExportContext {
             exportEmojis: options.exportEmojis,
             exportFiles: options.exportFiles,
             maxFileSizeMb: options.maxFileSizeMb,
+            exportConflictStrategy: options.exportConflictStrategy,
             dirCache: options.dirCache,
             control: options.control
           })
@@ -2742,7 +2809,8 @@ export class ExportContext {
             mediaRootDir,
             mediaRelativePrefix,
             options.dirCache,
-            options.control
+            options.control,
+            options
           )
           if (result) {
           }
@@ -2751,7 +2819,7 @@ export class ExportContext {
 
         if (localType === 34) {
           if (options.exportVoices) {
-            return this.exportVoice(msg, sessionId, mediaRootDir, mediaRelativePrefix, options.dirCache, options.control)
+            return this.exportVoice(msg, sessionId, mediaRootDir, mediaRelativePrefix, options.dirCache, options.control, options)
           }
           if (options.exportVoiceAsText) {
             return null
@@ -2759,7 +2827,7 @@ export class ExportContext {
         }
 
         if (localType === 47 && options.exportEmojis) {
-          const result = await this.exportEmoji(msg, sessionId, mediaRootDir, mediaRelativePrefix, options.dirCache, options.control)
+          const result = await this.exportEmoji(msg, sessionId, mediaRootDir, mediaRelativePrefix, options.dirCache, options.control, options)
           if (result) {
           }
           return result
@@ -2773,7 +2841,8 @@ export class ExportContext {
             mediaRelativePrefix,
             options.dirCache,
             options.includeVideoPoster === true,
-            options.control
+            options.control,
+            options
           )
         }
 
@@ -2784,7 +2853,8 @@ export class ExportContext {
             mediaRelativePrefix,
             options.maxFileSizeMb,
             options.dirCache,
-            options.control
+            options.control,
+            options
           )
         }
 
@@ -2798,6 +2868,7 @@ export class ExportContext {
           exportEmojis?: boolean
           exportFiles?: boolean
           maxFileSizeMb?: number
+          exportConflictStrategy?: ExportOptions['exportConflictStrategy']
           dirCache?: Set<string>
           control?: ExportTaskControl
         }): Promise<MediaExportItem | null> {
@@ -2846,14 +2917,18 @@ export class ExportContext {
           const destPath = path.join(targetDir, destFileName)
           if (path.resolve(sourcePath) !== path.resolve(destPath)) {
             if (kind === 'image' || kind === 'emoji' || kind === 'video') {
-              const copied = await this.copyMediaWithCacheAndDedup(kind, sourcePath, destPath, options.control)
+              const copied = await this.copyMediaWithCacheAndDedup(kind, sourcePath, destPath, options.control, options)
               if (!copied.success) return null
             } else {
               const existedBeforeCopy = await pathExists(destPath)
-              const copied = await copyFileOptimized(sourcePath, destPath)
-              if (!copied.success) return null
-              if (!existedBeforeCopy) options.control?.recordCreatedFile?.(destPath)
-              this.noteMediaTelemetry({ doneFiles: 1, bytesWritten: stat.size })
+              if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
+                this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+              } else {
+                const copied = await copyFileOptimized(sourcePath, destPath)
+                if (!copied.success) return null
+                if (!existedBeforeCopy) options.control?.recordCreatedFile?.(destPath)
+                this.noteMediaTelemetry({ doneFiles: 1, bytesWritten: stat.size })
+              }
             }
           }
 
@@ -2869,7 +2944,7 @@ export class ExportContext {
     /**
      * 导出图片文件
      */
-    private async exportImage(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl): Promise<MediaExportItem | null> {
+    private async exportImage(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<MediaExportItem | null> {
         try {
           const imagesDir = path.join(mediaRootDir, mediaRelativePrefix, 'images')
           await ensureExportDir(imagesDir, control, dirCache)
@@ -2992,6 +3067,14 @@ export class ExportContext {
             const fileName = `${messageId}_${imageKey}${ext}`
             const destPath = path.join(imagesDir, fileName)
 
+            if (await pathExists(destPath) && this.shouldReuseExistingExportFile(options)) {
+              this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+              return {
+                relativePath: path.posix.join(mediaRelativePrefix, 'images', fileName),
+                kind: 'image'
+              }
+            }
+
             const buffer = Buffer.from(base64Data, 'base64')
             await this.recordCreatedFileBeforeWrite(destPath, control)
             await fs.promises.writeFile(destPath, buffer)
@@ -3013,7 +3096,7 @@ export class ExportContext {
           const ext = path.extname(sourcePath) || '.jpg'
           const fileName = `${messageId}_${imageKey}${ext}`
           const destPath = path.join(imagesDir, fileName)
-          const copied = await this.copyMediaWithCacheAndDedup('image', sourcePath, destPath, control)
+          const copied = await this.copyMediaWithCacheAndDedup('image', sourcePath, destPath, control, options)
           if (!copied.success) {
             if (copied.code === 'ENOENT') {
               console.log(`[Export] 源图片文件不存在 (localId=${msg.localId}): ${sourcePath} → 将显示 [图片] 占位符`)
@@ -3033,10 +3116,19 @@ export class ExportContext {
         }
     }
 
-    public async preloadMediaLookupCaches(_sessionId: string, messages: any[], options: { exportImages?: boolean; exportVideos?: boolean }, control?: ExportTaskControl): Promise<void> {
+    public async preloadMediaLookupCaches(sessionId: string, messages: any[], options: { exportImages?: boolean; exportVideos?: boolean }, control?: ExportTaskControl): Promise<void> {
         if (!Array.isArray(messages) || messages.length === 0) return
         const md5Pattern = /^[a-f0-9]{32}$/i;
         const imageMd5Set = new Set<string>();
+        const videoTokenSet = new Set<string>();
+
+        if (options.exportVideos) {
+          const videoMessages = messages.filter((msg) => Number(msg?.localType || 0) === 43)
+          if (videoMessages.length > 0) {
+            await this.backfillMediaFieldsFromMessageDetail(sessionId, videoMessages, new Set([43]), control)
+          }
+        }
+
         let scanIndex = 0;
         for (const msg of messages) {
           if ((scanIndex++ & 0x7f) === 0) {
@@ -3054,11 +3146,26 @@ export class ExportContext {
             }
           }
 
+          if (options.exportVideos && msg?.localType === 43) {
+            const videoMd5 = String(msg?.videoMd5 || '').trim().toLowerCase()
+            if (videoMd5) {
+              videoTokenSet.add(videoMd5)
+              continue
+            }
+            const parsedVideoMd5 = String(videoService.parseVideoMd5(String(msg?.content || '')) || '').trim().toLowerCase()
+            if (parsedVideoMd5) {
+              videoTokenSet.add(parsedVideoMd5)
+            }
+          }
+
         }
 
         const preloadTasks: Array<Promise<void>> = [];
         if (imageMd5Set.size > 0) {
           preloadTasks.push(imageDecryptService.preloadImageHardlinkMd5s(Array.from(imageMd5Set)))
+        }
+        if (videoTokenSet.size > 0) {
+          preloadTasks.push(videoService.getVideoInfoBatch(Array.from(videoTokenSet), { includePoster: false }).then(() => undefined))
         }
 
         if (preloadTasks.length === 0) return
@@ -3112,7 +3219,7 @@ export class ExportContext {
     /**
      * 导出语音文件
      */
-    private async exportVoice(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl): Promise<MediaExportItem | null> {
+    private async exportVoice(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<MediaExportItem | null> {
         try {
           const voicesDir = path.join(mediaRootDir, mediaRelativePrefix, 'voices')
           await ensureExportDir(voicesDir, control, dirCache)
@@ -3125,8 +3232,8 @@ export class ExportContext {
           const fileName = `voice_${safeSession}_${stableKey || msgId}.wav`
           const destPath = path.join(voicesDir, fileName)
 
-          // 如果已存在则跳过
-          if (await pathExists(destPath)) {
+          if (await pathExists(destPath) && this.shouldReuseExistingExportFile(options)) {
+            this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
             return {
               relativePath: path.posix.join(mediaRelativePrefix, 'voices', fileName),
               kind: 'voice'
@@ -3169,8 +3276,9 @@ export class ExportContext {
     public async transcribeVoice(sessionId: string, msgId: string, createTime: number, senderWxid: string | null): Promise<string> {
         try {
           const transcript = await chatService.getVoiceTranscript(sessionId, msgId, createTime, undefined, senderWxid || undefined)
-          if (transcript.success && transcript.transcript) {
-            return `[语音转文字] ${transcript.transcript}`
+          if (transcript.success) {
+            const text = String(transcript.transcript || '').trim()
+            return text ? `[语音转文字] ${text}` : '[语音消息 - 未识别到文字]'
           }
           return `[语音消息 - 转文字失败: ${transcript.error || '未知错误'}]`
         } catch (e) {
@@ -3181,7 +3289,7 @@ export class ExportContext {
     /**
      * 导出表情文件
      */
-    private async exportEmoji(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl): Promise<MediaExportItem | null> {
+    private async exportEmoji(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<MediaExportItem | null> {
         try {
           const emojisDir = path.join(mediaRootDir, mediaRelativePrefix, 'emojis')
           await ensureExportDir(emojisDir, control, dirCache)
@@ -3211,7 +3319,7 @@ export class ExportContext {
           const key = emojiMd5 || crypto.createHash('md5').update(emojiUrl || localPath || String(msg.localId || '')).digest('hex')
           const fileName = `${key}${ext}`
           const destPath = path.join(emojisDir, fileName)
-          const copied = await this.copyMediaWithCacheAndDedup('emoji', localPath, destPath, control)
+          const copied = await this.copyMediaWithCacheAndDedup('emoji', localPath, destPath, control, options)
           if (!copied.success) return null
 
           return {
@@ -3227,9 +3335,34 @@ export class ExportContext {
     /**
      * 导出视频文件
      */
-    private async exportVideo(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, includePoster = false, control?: ExportTaskControl): Promise<MediaExportItem | null> {
+    private async exportVideo(msg: any, sessionId: string, mediaRootDir: string, mediaRelativePrefix: string, dirCache?: Set<string>, includePoster = false, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<MediaExportItem | null> {
         try {
-          let videoMd5 = String(msg.videoMd5 || '').trim().toLowerCase()
+          const collectLookupTokens = () => {
+            const contents = [
+              msg?.content,
+              msg?.messageContent,
+              msg?.message_content,
+              msg?.rawContent,
+              msg?.raw_content,
+              msg?.parsedContent,
+              msg?.parsed_content
+            ].map((item) => String(item || '')).filter(Boolean)
+            const tokens = [
+              msg?.videoMd5,
+              msg?.video_md5,
+              msg?.rawMd5,
+              msg?.raw_md5,
+              this.extractVideoFileNameFromRow(msg, contents[0] || ''),
+              this.normalizeVideoFileToken(this.resolveWeliveMediaPath(msg))
+            ]
+            for (const content of contents) {
+              tokens.push(videoService.parseVideoMd5(content))
+              tokens.push(this.extractVideoMd5(content))
+            }
+            return Array.from(new Set(tokens
+              .map((token) => this.normalizeVideoFileToken(token))
+              .filter((token): token is string => Boolean(token))))
+          }
           const resolveVideoInfo = async (token: string) => {
             if (!token) return null
             const videoInfo = await videoService.getVideoInfo(token, { includePoster })
@@ -3237,13 +3370,19 @@ export class ExportContext {
             return videoInfo
           }
 
-          let videoInfo = await resolveVideoInfo(videoMd5)
+          let videoInfo = null
+          for (const token of collectLookupTokens()) {
+            videoInfo = await resolveVideoInfo(token)
+            if (videoInfo) break
+          }
           if (!videoInfo) {
             const localId = Number(msg?.localId || 0)
             if (Number.isFinite(localId) && localId > 0) {
               await this.backfillMediaFieldsFromMessageDetail(sessionId, [msg], new Set([43]), undefined, { force: true })
-              videoMd5 = String(msg.videoMd5 || '').trim().toLowerCase()
-              videoInfo = await resolveVideoInfo(videoMd5)
+              for (const token of collectLookupTokens()) {
+                videoInfo = await resolveVideoInfo(token)
+                if (videoInfo) break
+              }
             }
           }
           if (!videoInfo) return null
@@ -3256,7 +3395,7 @@ export class ExportContext {
           const fileName = path.basename(sourcePath)
           const destPath = path.join(videosDir, fileName)
 
-          const copied = await this.copyMediaWithCacheAndDedup('video', sourcePath, destPath, control)
+          const copied = await this.copyMediaWithCacheAndDedup('video', sourcePath, destPath, control, options)
           if (!copied.success) return null
 
           return {
@@ -3398,12 +3537,19 @@ export class ExportContext {
 
     private extractVideoMd5(content: string): string | undefined {
         if (!content) return undefined
-        const attrMatch = /<videomsg[^>]*\smd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(content);
-        if (attrMatch) {
-          return attrMatch[1].toLowerCase()
+        const attrPatterns = [
+          /<videomsg[^>]*\smd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i,
+          /<videomsg[^>]*\srawmd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i,
+          /<videomsg[^>]*\snewmd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i,
+          /<videomsg[^>]*\soriginsourcemd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i,
+          /(?:^|\s)(?:md5|rawmd5|newmd5|originsourcemd5)\s*=\s*['"]([a-fA-F0-9]+)['"]/i
+        ]
+        for (const pattern of attrPatterns) {
+          const match = pattern.exec(content)
+          if (match?.[1]) return match[1].toLowerCase()
         }
 
-        const tagMatch = /<md5>([^<]+)<\/md5>/i.exec(content);
+        const tagMatch = /<(?:md5|rawmd5|newmd5|originsourcemd5)>([a-fA-F0-9]+)<\/(?:md5|rawmd5|newmd5|originsourcemd5)>/i.exec(content);
         return tagMatch?.[1]?.toLowerCase()
     }
 
@@ -3752,7 +3898,7 @@ export class ExportContext {
         return candidates
     }
 
-    private async exportFileAttachment(msg: any, mediaRootDir: string, mediaRelativePrefix: string, maxFileSizeMb?: number, dirCache?: Set<string>, control?: ExportTaskControl): Promise<MediaExportItem | null> {
+    private async exportFileAttachment(msg: any, mediaRootDir: string, mediaRelativePrefix: string, maxFileSizeMb?: number, dirCache?: Set<string>, control?: ExportTaskControl, options?: Pick<ExportOptions, 'exportConflictStrategy'>): Promise<MediaExportItem | null> {
         try {
           const fileNameRaw = String(msg?.fileName || '').trim()
           if (!fileNameRaw) return null
@@ -3804,6 +3950,14 @@ export class ExportContext {
           const destFileName = `${messageId}_${safeBaseName}`
           const destPath = path.join(fileDir, destFileName)
           const existedBeforeCopy = await pathExists(destPath)
+          if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
+            this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
+            return {
+              relativePath: path.posix.join(mediaRelativePrefix, 'file', fileExtDir, destFileName),
+              kind: 'file'
+            }
+          }
+
           const copied = await copyFileOptimized(selected.sourcePath, destPath)
           if (!copied.success) {
             this.recordFileAttachmentMiss(msg, '附件复制失败', {
@@ -3882,8 +4036,7 @@ export class ExportContext {
         mediaRootDir: string
         mediaRelativePrefix: string
         } {
-        const exportMediaEnabled = options.exportMedia === true &&
-                  Boolean(options.exportImages || options.exportVoices || options.exportVideos || options.exportEmojis || options.exportFiles);
+        const exportMediaEnabled = this.isMediaExportEnabled(options);
         const outputDir = path.dirname(outputPath);
         const writeLayout = this.resolveExportWriteLayout(options);
         if (writeLayout === 'A' && path.basename(outputDir) === 'texts') {
@@ -3904,7 +4057,7 @@ export class ExportContext {
 
     public async resolveWeliveRawMediaItem(msg: any, mediaRootDir: string, mediaRelativePrefix: string, options: ExportOptions, control?: ExportTaskControl): Promise<MediaExportItem | null> {
         if (!this.isWeliveRawExportMode()) return null
-        const sourcePathRaw = String(msg?.mediaPath || msg?.media_path || '').trim()
+        const sourcePathRaw = this.resolveWeliveMediaPath(msg)
         const localType = Number(msg?.localType || msg?.local_type || 0)
         const mediaType = String(msg?.mediaType || msg?.media_type || '').trim().toLowerCase()
 
@@ -3922,26 +4075,9 @@ export class ExportContext {
         }
         if (!kind) return null
         if (!sourcePathRaw) {
-          const emojiUrl = kind === 'emoji'
-            ? String(msg?.emojiCdnUrl || msg?.emoji_cdn_url || '').trim()
-            : ''
-          if (emojiUrl) {
-            return await this.exportEmoji({
-              ...msg,
-              emojiCdnUrl: emojiUrl,
-              emojiMd5: this.normalizeEmojiMd5(msg?.emojiMd5 || msg?.emoji_md5)
-            }, String(msg?.sessionId || msg?.session_id || ''), mediaRootDir, mediaRelativePrefix, undefined, control)
-          }
           return null
         }
         if (/^https?:\/\//i.test(sourcePathRaw)) {
-          if (kind === 'emoji') {
-            return await this.exportEmoji({
-              ...msg,
-              emojiCdnUrl: sourcePathRaw,
-              emojiMd5: this.normalizeEmojiMd5(msg?.emojiMd5 || msg?.emoji_md5)
-            }, String(msg?.sessionId || msg?.session_id || ''), mediaRootDir, mediaRelativePrefix, undefined, control)
-          }
           return { relativePath: sourcePathRaw, kind }
         }
 
@@ -3954,88 +4090,17 @@ export class ExportContext {
     }
 
     public async preloadWeliveRawEmojiMedia(
-      messages: any[],
-      mediaCache: Map<string, MediaExportItem | null>,
-      mediaRootDir: string,
-      mediaRelativePrefix: string,
-      options: ExportOptions,
-      control?: ExportTaskControl,
-      onProgress?: (progress: ExportProgress) => void,
-      sessionName = '',
-      progressCurrent = 25
+      _messages: any[],
+      _mediaCache: Map<string, MediaExportItem | null>,
+      _mediaRootDir: string,
+      _mediaRelativePrefix: string,
+      _options: ExportOptions,
+      _control?: ExportTaskControl,
+      _onProgress?: (progress: ExportProgress) => void,
+      _sessionName = '',
+      _progressCurrent = 25
     ): Promise<void> {
-        if (!this.isWeliveRawExportMode() || options.exportEmojis !== true || !Array.isArray(messages) || messages.length === 0) return
-
-        const groups = new Map<string, { msg: any; mediaKeys: string[] }>()
-        for (const msg of messages) {
-          const localType = Number(msg?.localType || msg?.local_type || 0)
-          const mediaType = String(msg?.mediaType || msg?.media_type || '').trim().toLowerCase()
-          if (localType !== 47 && mediaType !== 'emoji') continue
-
-          const mediaKey = this.getMediaCacheKey(msg)
-          if (mediaCache.has(mediaKey)) continue
-
-          const sourcePathRaw = String(msg?.mediaPath || msg?.media_path || '').trim()
-          const emojiUrl = /^https?:\/\//i.test(sourcePathRaw)
-            ? sourcePathRaw
-            : this.normalizeEmojiCdnUrl(msg?.emojiCdnUrl || msg?.emoji_cdn_url || this.extractEmojiUrl(String(msg?.content || '')))
-          if (!emojiUrl) continue
-
-          const emojiMd5 = this.normalizeEmojiMd5(msg?.emojiMd5 || msg?.emoji_md5)
-          const groupKey = emojiMd5 || emojiUrl
-          const existing = groups.get(groupKey)
-          if (existing) {
-            existing.mediaKeys.push(mediaKey)
-          } else {
-            groups.set(groupKey, {
-              msg: {
-                ...msg,
-                mediaPath: /^https?:\/\//i.test(sourcePathRaw) ? sourcePathRaw : msg?.mediaPath,
-                media_path: /^https?:\/\//i.test(sourcePathRaw) ? sourcePathRaw : msg?.media_path,
-                emojiCdnUrl: emojiUrl,
-                emojiMd5: emojiMd5 || msg?.emojiMd5
-              },
-              mediaKeys: [mediaKey]
-            })
-          }
-        }
-
-        const workItems = Array.from(groups.values())
-        if (workItems.length === 0) return
-
-        const concurrencySeed = typeof options.exportConcurrency === 'number'
-          ? options.exportConcurrency * 4
-          : undefined
-        const concurrency = this.getClampedConcurrency(concurrencySeed, 12, 24)
-        let completed = 0
-        let lastReportAt = 0
-        const report = (force = false) => {
-          if (!onProgress) return
-          const now = Date.now()
-          if (!force && now - lastReportAt < 350) return
-          lastReportAt = now
-          onProgress({
-            current: progressCurrent,
-            total: 100,
-            currentSession: sessionName,
-            phase: 'exporting-media',
-            phaseProgress: completed,
-            phaseTotal: workItems.length,
-            phaseLabel: `下载表情包 ${completed.toLocaleString()}/${workItems.length.toLocaleString()}`,
-            ...this.getMediaTelemetrySnapshot()
-          })
-        }
-
-        report(true)
-        await parallelLimit(workItems, concurrency, async (item) => {
-          this.throwIfStopRequested(control)
-          const mediaItem = await this.resolveWeliveRawMediaItem(item.msg, mediaRootDir, mediaRelativePrefix, options, control)
-          for (const mediaKey of item.mediaKeys) {
-            mediaCache.set(mediaKey, mediaItem)
-          }
-          completed++
-          report(completed === workItems.length || completed % 10 === 0)
-        })
+        // WeLive raw export owns media resolution. Weflow must not scan/copy original media here.
     }
 
     public collectMediaMessagesForExport(messages: any[], options: ExportOptions): any[] {
@@ -4262,6 +4327,8 @@ export class ExportContext {
 
             senderSet.add(actualSender)
             rows.push({
+              sessionId,
+              session_id: sessionId,
               localId: this.getIntFromRow(row, ['local_id', 'localId', 'LocalId', 'msg_local_id', 'msgLocalId', 'MsgLocalId', 'msg_id', 'msgId', 'MsgId', 'id', 'WCDB_CT_local_id'], 0),
               serverId: this.getIntFromRow(row, ['server_id', 'serverId', 'ServerId', 'msg_server_id', 'msgServerId', 'MsgServerId', 'svr_id', 'svrId', 'msg_svr_id', 'msgSvrId', 'MsgSvrId', 'WCDB_CT_server_id'], 0),
               serverIdRaw: this.normalizeUnsignedIntToken(this.getRowField(row, ['server_id', 'serverId', 'ServerId', 'msg_server_id', 'msgServerId', 'MsgServerId', 'svr_id', 'svrId', 'msg_svr_id', 'msgSvrId', 'MsgSvrId', 'WCDB_CT_server_id'])) || undefined,
@@ -4280,7 +4347,7 @@ export class ExportContext {
               fileSize,
               fileExt,
               fileMd5,
-              mediaPath: String(row.media_path || row.mediaPath || '').trim() || undefined,
+              mediaPath: this.resolveWeliveMediaPath(row) || undefined,
               mediaType: String(row.media_type || row.mediaType || '').trim() || undefined,
               mediaError: String(row.media_error || row.mediaError || '').trim() || undefined,
               locationLat,

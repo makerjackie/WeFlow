@@ -21,7 +21,7 @@ import {
   type ExportDefaultDateRangeConfig
 } from '../../../../utils/exportDateRange'
 import type { ExportDialogState, ExportOptions, TextExportFormat } from '../../types'
-import { formatOptions, MAX_EXPORT_FILE_SIZE_MB_LIMIT } from '../../constants'
+import { conflictStrategyOptions, formatOptions, MAX_EXPORT_FILE_SIZE_MB_LIMIT } from '../../constants'
 import { formatPathBrief } from '../../utils/format'
 import './ExportDialog.scss'
 
@@ -275,6 +275,23 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
                       type="button"
                       className={options.exportPathStyle === item.value ? 'active' : ''}
                       onClick={() => onOptionsChange({ exportPathStyle: item.value as ExportOptions['exportPathStyle'] })}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="conflict-strategy-control">
+                <span>同名文件:</span>
+                <div className="conflict-strategy-segmented" title="控制导出目标已有同名文件时的处理方式">
+                  {conflictStrategyOptions.map(item => (
+                    <button
+                      key={item.value}
+                      type="button"
+                      className={options.exportConflictStrategy === item.value ? 'active' : ''}
+                      title={item.desc}
+                      onClick={() => onOptionsChange({ exportConflictStrategy: item.value })}
                     >
                       {item.label}
                     </button>

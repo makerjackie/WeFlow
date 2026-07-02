@@ -6,7 +6,7 @@
  */
 
 import { memo, useEffect, useState, useCallback } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import ExportTopBar from './components/ExportTopBar'
 import SessionTable from './components/SessionTable'
 import ExportDialog from './components/ExportDialog'
@@ -26,20 +26,28 @@ import { useAutomationRunner, useAutomationStore } from './hooks/useAutomation'
 import { AutomationModal } from './components/Automation/AutomationModal'
 import { AutomationTaskForm } from './components/Automation/AutomationTaskForm'
 
-import type { SessionRow } from './types'
+import type { SessionRow, TextExportFormat } from './types'
 import { getSelectionScopeFromRows, resolveScopeDisplayNames } from './utils/session'
+import {
+  emitSingleExportDialogStatus,
+  onOpenSingleExport,
+  type OpenSingleExportPayload
+} from '../../services/exportBridge'
 import './ExportPage.scss'
 
 function ExportPage() {
   const location = useLocation()
+  const navigate = useNavigate()
   const isExportRoute = location.pathname === '/export'
 
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set())
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false)
   const [draftAutomationPayload, setDraftAutomationPayload] = useState<any>(null)
+  const [pendingSingleExportRequest, setPendingSingleExportRequest] = useState<OpenSingleExportPayload | null>(null)
 
   const { 
+    isLoaded: isConfigLoaded,
     options, 
     updateOptions,
     exportPath,
@@ -60,9 +68,10 @@ function ExportPage() {
   } = useContactsLoader()
 
   // ── 3. Metrics ──
-  const { metricsMap, fetchMetrics } = useSessionMetrics()
+  const { metricsMap, fetchMetrics, loadingRefs } = useSessionMetrics()
 
   const {
+    sessions,
     filteredSessions,
     isLoading: isSessionsLoading,
     activeTab,
@@ -94,6 +103,11 @@ function ExportPage() {
     }
   }, [displayedSessions, fetchMetrics])
 
+  const handleRefreshStats = useCallback(() => {
+    if (sessions.length === 0 || loadingRefs.size > 0) return
+    void fetchMetrics(sessions.map(s => s.username), { forceRefresh: true })
+  }, [fetchMetrics, loadingRefs.size, sessions])
+
   // ── 4. Manage Tasks ──
   const {
     tasks: exportTasks,
@@ -109,16 +123,30 @@ function ExportPage() {
     allTasks: backgroundTasks,
     pauseTask: pauseBgTask,
     resumeTask: resumeBgTask,
-    cancelTask: cancelBgTask
+    cancelTask: cancelBgTask,
+    clearSettledTasks: clearSettledBgTasks
   } = useBackgroundTasks()
+  const taskCenterBackgroundTasks = backgroundTasks.filter(task => task.sourcePage === 'export' || task.sourcePage === 'chat')
+
+  const clearCompletedTaskCenterBackgroundTasks = useCallback(() => {
+    clearSettledBgTasks(task => task.sourcePage === 'export' || task.sourcePage === 'chat')
+  }, [clearSettledBgTasks])
 
   // ── 4. Dialog & Exports ──
   const { dialogState, openDialog, closeDialog } = useExportDialog()
 
+  const resolveSingleExportName = useCallback((payload: OpenSingleExportPayload) => {
+    const sessionId = String(payload.sessionId || '').trim()
+    const payloadName = typeof payload.sessionName === 'string' ? payload.sessionName.trim() : ''
+    const sessionRow = sessions.find(s => s.username === sessionId)
+    return payloadName || sessionRow?.displayName || sessionRow?.remark || sessionRow?.nickname || sessionId
+  }, [sessions])
+
   const handleExportDefaultsChanged = useCallback((patch: ExportDefaultsSettingsPatch) => {
     updateOptions({
-      ...(patch.format ? { defaultFormat: patch.format as any } : {}),
+      ...(patch.format ? { format: patch.format as TextExportFormat } : {}),
       ...(patch.avatars !== undefined ? { exportAvatars: patch.avatars } : {}),
+      ...(patch.fileNamingMode !== undefined ? { fileNamingMode: patch.fileNamingMode } : {}),
     })
   }, [updateOptions])
 
@@ -171,6 +199,58 @@ function ExportPage() {
     })
   }, [displayedSessions, options.displayNamePreference, openDialog])
 
+  const handleOpenSingleExportRequest = useCallback((payload: OpenSingleExportPayload) => {
+    const requestId = typeof payload?.requestId === 'string' ? payload.requestId.trim() : ''
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId.trim() : ''
+
+    if (!requestId || !sessionId) {
+      if (requestId) {
+        emitSingleExportDialogStatus({
+          requestId,
+          status: 'failed',
+          message: '无法打开导出配置：缺少会话信息'
+        })
+      }
+      return
+    }
+
+    emitSingleExportDialogStatus({ requestId, status: 'initializing' })
+
+    if (!isConfigLoaded) {
+      setPendingSingleExportRequest({
+        ...payload,
+        requestId,
+        sessionId
+      })
+      return
+    }
+
+    const sessionName = resolveSingleExportName(payload)
+    setSelectedSessionIds(new Set([sessionId]))
+    setActiveTab(sessionId.includes('@chatroom') ? 'group' : 'private')
+    navigate('/export')
+
+    openDialog({
+      intent: 'manual',
+      scope: 'single',
+      sessionIds: [sessionId],
+      sessionNames: [sessionName],
+      title: `导出: ${sessionName}`
+    })
+
+    emitSingleExportDialogStatus({ requestId, status: 'opened' })
+  }, [isConfigLoaded, navigate, openDialog, resolveSingleExportName, setActiveTab])
+
+  useEffect(() => {
+    return onOpenSingleExport(handleOpenSingleExportRequest)
+  }, [handleOpenSingleExportRequest])
+
+  useEffect(() => {
+    if (!isConfigLoaded || !pendingSingleExportRequest) return
+    setPendingSingleExportRequest(null)
+    handleOpenSingleExportRequest(pendingSingleExportRequest)
+  }, [handleOpenSingleExportRequest, isConfigLoaded, pendingSingleExportRequest])
+
   const handleConfirmExport = useCallback((finalOptions: any) => {
     startTask({
       sessionIds: dialogState.sessionIds,
@@ -212,22 +292,27 @@ function ExportPage() {
             sortConfig={sortConfig}
             onSortChange={setSortConfig}
             metricsMap={metricsMap}
+            loadingRefs={loadingRefs}
+            metricsLoadingCount={loadingRefs.size}
+            onRefreshStats={handleRefreshStats}
+            isRefreshingStats={loadingRefs.size > 0}
             onSingleExport={handleSingleExport}
             onBatchExport={handleExportSelected}
             onAutomationExport={handleAutomationExportFromSelection}
           />
         </section>
 
-        {(exportTasks.length > 0 || backgroundTasks.filter(t => t.sourcePage === 'export').length > 0) && (
+        {(exportTasks.length > 0 || taskCenterBackgroundTasks.length > 0) && (
           <section className="export-v2-task-panel">
             <TaskCenter
               exportTasks={exportTasks}
               onCancelExportTask={cancelExportTask}
               onClearCompletedExportTasks={clearCompletedExportTasks}
-              backgroundTasks={backgroundTasks.filter(t => t.sourcePage === 'export')}
+              backgroundTasks={taskCenterBackgroundTasks}
               onPauseBackgroundTask={pauseBgTask}
               onResumeBackgroundTask={resumeBgTask}
               onCancelBackgroundTask={cancelBgTask}
+              onClearCompletedBackgroundTasks={clearCompletedTaskCenterBackgroundTasks}
             />
           </section>
         )}

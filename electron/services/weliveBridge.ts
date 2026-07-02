@@ -43,6 +43,7 @@ export interface WeliveExportRequest {
   outputDir: string
   exportsDir?: string
   mediaDir?: string
+  mediaTypes?: Array<'image' | 'voice' | 'video' | 'emoji' | 'file'>
   emojiCacheDir?: string
   formattedDir?: string
   format?: string
@@ -76,6 +77,7 @@ export interface WeliveExportResult {
   rawResult?: WeliveExportEvent
   stderr?: string
   error?: string
+  diagnostics?: Record<string, unknown>
 }
 
 const platformDir = () => {
@@ -89,6 +91,36 @@ const archDir = () => {
 }
 
 const executableName = () => process.platform === 'win32' ? 'welive.exe' : 'welive'
+
+const formatExitCode = (code: number | null, signal: NodeJS.Signals | null | undefined) => {
+  if (code === null) return signal ? `signal:${signal}` : 'unknown'
+  const unsigned = code >>> 0
+  const signed = unsigned > 0x7fffffff ? unsigned - 0x100000000 : unsigned
+  const hex = `0x${unsigned.toString(16).toUpperCase().padStart(8, '0')}`
+  return signed === code
+    ? `${code} (${hex})`
+    : `${code} (${hex}, signed ${signed})`
+}
+
+const summarizeEvent = (event?: WeliveExportEvent) => {
+  if (!event) return undefined
+  const summary: Record<string, unknown> = { type: event.type }
+  for (const key of ['phase', 'label', 'session_id', 'current', 'total', 'exported_messages', 'estimated_total_messages']) {
+    if ((event as any)[key] !== undefined) summary[key] = (event as any)[key]
+  }
+  return summary
+}
+
+const formatDiagnostics = (diagnostics: Record<string, unknown>) => {
+  const parts = [
+    diagnostics.exit ? `exit=${diagnostics.exit}` : '',
+    diagnostics.exe ? `exe=${diagnostics.exe}` : '',
+    diagnostics.platform ? `platform=${diagnostics.platform}` : '',
+    diagnostics.arch ? `arch=${diagnostics.arch}` : '',
+    diagnostics.lastEvent ? `lastEvent=${JSON.stringify(diagnostics.lastEvent)}` : ''
+  ].filter(Boolean)
+  return parts.length > 0 ? `[welive-diagnostics] ${parts.join(' ')}` : ''
+}
 
 export function resolveWeliveExecutable(resourcesPath: string, appPath?: string): string | null {
   const platform = platformDir()
@@ -137,6 +169,8 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
     let stderr = ''
     let settled = false
     let rawResult: WeliveExportEvent | undefined
+    let lastEvent: WeliveExportEvent | undefined
+    const eventTrail: Array<Record<string, unknown>> = []
     const failedSessionErrors: Record<string, string> = {}
     const sessionOutputPaths: Record<string, string> = {}
     const rawSessionOutputPaths: Record<string, string> = {}
@@ -156,6 +190,12 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
     options.signal?.addEventListener('abort', abort)
 
     const handleEvent = (event: WeliveExportEvent) => {
+      lastEvent = event
+      const eventSummary = summarizeEvent(event)
+      if (eventSummary) {
+        eventTrail.push(eventSummary)
+        if (eventTrail.length > 8) eventTrail.shift()
+      }
       options.onEvent?.(event)
       if (event.type === 'session_error') {
         const sessionId = String(event.session_id || '').trim()
@@ -224,14 +264,35 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
         sessionOutputPaths,
         rawSessionOutputPaths,
         rawResult,
-        error: error.message
+        error: error.message,
+        diagnostics: {
+          exe,
+          platform: process.platform,
+          arch: process.arch,
+          pid: child.pid,
+          lastEvent: summarizeEvent(lastEvent),
+          eventTrail
+        }
       })
     })
 
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
       drainStdout()
       const failedSessionIds = Object.keys(failedSessionErrors)
       const success = code === 0 && rawResult?.type === 'result' && rawResult.success !== false
+      const diagnostics = {
+        exit: formatExitCode(code, signal),
+        code,
+        signal,
+        exe,
+        platform: process.platform,
+        arch: process.arch,
+        pid: child.pid,
+        lastEvent: summarizeEvent(lastEvent),
+        eventTrail
+      }
+      const diagnosticText = success ? '' : formatDiagnostics(diagnostics)
+      const errorText = stderr.trim() || `WeLive 导出引擎退出码: ${formatExitCode(code, signal)}`
       finish({
         success,
         successCount: Number((rawResult as any)?.success_count ?? Object.keys(sessionOutputPaths).length),
@@ -241,7 +302,8 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
         sessionOutputPaths,
         rawSessionOutputPaths,
         rawResult,
-        error: success ? undefined : stderr.trim() || `WeLive 导出引擎退出码: ${code}`
+        diagnostics,
+        error: success ? undefined : [errorText, diagnosticText].filter(Boolean).join('\n')
       })
     })
 

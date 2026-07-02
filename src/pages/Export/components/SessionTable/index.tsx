@@ -1,6 +1,6 @@
-import React, { memo, useRef, useCallback } from 'react'
+import React, { memo, useRef, useCallback, useEffect, useState } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { Search, Hash, Clock, MoreVertical, X, CheckSquare, Square } from 'lucide-react'
+import { Search, X, CheckSquare, Square, RefreshCw } from 'lucide-react'
 import type { SessionRow, ConversationTab, ContactsSortConfig } from '../../types'
 import type { SessionContentMetric } from '../../hooks/useSessionMetrics'
 import { conversationTabLabels, exportKindPriority } from '../../constants'
@@ -23,6 +23,10 @@ interface SessionTableProps {
   onAutomationExport?: () => void
   isLoading?: boolean
   metricsMap?: Record<string, SessionContentMetric>
+  loadingRefs?: Set<string>
+  metricsLoadingCount?: number
+  onRefreshStats?: () => void
+  isRefreshingStats?: boolean
 }
 
 const SessionTable: React.FC<SessionTableProps> = ({
@@ -39,9 +43,33 @@ const SessionTable: React.FC<SessionTableProps> = ({
   onBatchExport,
   onAutomationExport,
   isLoading,
-  metricsMap
+  metricsMap,
+  loadingRefs,
+  metricsLoadingCount = 0,
+  onRefreshStats,
+  isRefreshingStats = false
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const [isStatsNoticeMounted, setIsStatsNoticeMounted] = useState(false)
+  const [isStatsNoticeLeaving, setIsStatsNoticeLeaving] = useState(false)
+  const isMetricsScanning = metricsLoadingCount > 0
+
+  useEffect(() => {
+    if (isMetricsScanning) {
+      setIsStatsNoticeMounted(true)
+      setIsStatsNoticeLeaving(false)
+      return
+    }
+
+    if (!isStatsNoticeMounted) return
+    setIsStatsNoticeLeaving(true)
+    const timer = window.setTimeout(() => {
+      setIsStatsNoticeMounted(false)
+      setIsStatsNoticeLeaving(false)
+    }, 260)
+
+    return () => window.clearTimeout(timer)
+  }, [isMetricsScanning, isStatsNoticeMounted])
 
   const handleSearchClear = () => onSearchChange('')
 
@@ -124,6 +152,19 @@ const SessionTable: React.FC<SessionTableProps> = ({
             </button>
           )}
         </div>
+
+        {onRefreshStats && (
+          <button
+            type="button"
+            className={`st-refresh-stats-btn ${isRefreshingStats ? 'refreshing' : ''}`}
+            onClick={onRefreshStats}
+            disabled={isRefreshingStats || isLoading || sessions.length === 0}
+            title="重建导出统计缓存"
+            aria-label="重建导出统计缓存"
+          >
+            <RefreshCw size={16} />
+          </button>
+        )}
       </div>
 
       {/* ─── Table Columns Header ─────────────────────────────────────── */}
@@ -160,9 +201,35 @@ const SessionTable: React.FC<SessionTableProps> = ({
 
       {/* ─── Virtualized List ─────────────────────────────────────────── */}
       <div className="table-body">
-        {sessions.length === 0 ? (
+        {isLoading && sessions.length === 0 ? (
+          // 初始加载骨架屏，风格与「我的足迹」保持一致
+          <div className="st-skeleton-body" aria-busy="true" aria-live="polite">
+            <div className="st-skeleton-header">
+              {Array.from({ length: 10 }).map((_, i) => (
+                <div key={i} className="st-skeleton-cell st-skeleton-shimmer" />
+              ))}
+            </div>
+            <div className="st-skeleton-rows">
+              {Array.from({ length: 10 }).map((_, rowIndex) => (
+                <div key={rowIndex} className="st-skeleton-row">
+                  <div className="st-skeleton-checkbox st-skeleton-shimmer" />
+                  <div className="st-skeleton-info">
+                    <div className="st-skeleton-avatar st-skeleton-shimmer" />
+                    <div className="st-skeleton-text">
+                      <div className="st-skeleton-line st-skeleton-shimmer" />
+                      <div className="st-skeleton-line short st-skeleton-shimmer" />
+                    </div>
+                  </div>
+                  {Array.from({ length: 7 }).map((_, i) => (
+                    <div key={i} className="st-skeleton-stat st-skeleton-shimmer" />
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : sessions.length === 0 ? (
           <div className="empty-state">
-            {isLoading ? '加载中...' : (searchQuery ? '没有匹配的会话' : '此分类下没有会话')}
+            {searchQuery ? '没有匹配的会话' : '此分类下没有会话'}
           </div>
         ) : (
           <Virtuoso
@@ -170,8 +237,9 @@ const SessionTable: React.FC<SessionTableProps> = ({
             data={sessions}
             itemContent={(index, session) => {
               if (!session) return null
-              
+
               const metrics = metricsMap?.[session.username]
+              const isMetricsLoading = !metrics && loadingRefs?.has(session.username)
               const totalCount = metrics?.totalMessages ?? session.messageCountHint ?? 0
 
               return (
@@ -198,17 +266,53 @@ const SessionTable: React.FC<SessionTableProps> = ({
                       <span className="st-id" title={session.username}>{session.username}</span>
                     </div>
                   </div>
-                  <div className="col-count">{totalCount.toLocaleString()}</div>
+                  <div className="col-count">
+                    {isMetricsLoading ? (
+                      <span className="st-stat-shimmer" />
+                    ) : (
+                      <span className="st-stat-fade-in">{totalCount.toLocaleString()}</span>
+                    )}
+                  </div>
                   <div className="col-time">
                     {session.lastTimestamp ? formatLatestMessageTimeFromSeconds(session.lastTimestamp).text : '-'}
                   </div>
-                  <div className="col-stat">{metrics?.emojiMessages ?? '-'}</div>
-                  <div className="col-stat">{metrics?.voiceMessages ?? '-'}</div>
-                  <div className="col-stat">{metrics?.imageMessages ?? '-'}</div>
-                  <div className="col-stat">{metrics?.videoMessages ?? '-'}</div>
-                  <div className="col-stat">{metrics?.fileMessages ?? '-'}</div>
+                  <div className="col-stat">
+                    {isMetricsLoading ? (
+                      <span className="st-stat-shimmer" />
+                    ) : (
+                      <span className="st-stat-fade-in">{metrics?.emojiMessages ?? '-'}</span>
+                    )}
+                  </div>
+                  <div className="col-stat">
+                    {isMetricsLoading ? (
+                      <span className="st-stat-shimmer" />
+                    ) : (
+                      <span className="st-stat-fade-in">{metrics?.voiceMessages ?? '-'}</span>
+                    )}
+                  </div>
+                  <div className="col-stat">
+                    {isMetricsLoading ? (
+                      <span className="st-stat-shimmer" />
+                    ) : (
+                      <span className="st-stat-fade-in">{metrics?.imageMessages ?? '-'}</span>
+                    )}
+                  </div>
+                  <div className="col-stat">
+                    {isMetricsLoading ? (
+                      <span className="st-stat-shimmer" />
+                    ) : (
+                      <span className="st-stat-fade-in">{metrics?.videoMessages ?? '-'}</span>
+                    )}
+                  </div>
+                  <div className="col-stat">
+                    {isMetricsLoading ? (
+                      <span className="st-stat-shimmer" />
+                    ) : (
+                      <span className="st-stat-fade-in">{metrics?.fileMessages ?? '-'}</span>
+                    )}
+                  </div>
                   <div className="col-action">
-                    <button 
+                    <button
                       className="st-action-btn"
                       onClick={(e) => {
                         e.stopPropagation()
@@ -222,6 +326,17 @@ const SessionTable: React.FC<SessionTableProps> = ({
               )
             }}
           />
+        )}
+
+        {isStatsNoticeMounted && (
+          <div
+            className={`st-metrics-status ${isStatsNoticeLeaving ? 'leaving' : ''}`}
+            aria-live="polite"
+          >
+            <span className="st-metrics-status-dot" />
+            <span>正在统计会话消息，已完成的结果会逐行更新</span>
+            <span className="st-metrics-status-count">{metricsLoadingCount.toLocaleString()} 项</span>
+          </div>
         )}
       </div>
     </div>

@@ -8,6 +8,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { BackgroundTaskRecord } from '../../../types/backgroundTask'
 import {
+  clearSettledBackgroundTasks,
   requestCancelBackgroundTask,
   requestCancelBackgroundTasks,
   requestPauseBackgroundTask,
@@ -25,6 +26,7 @@ export interface BackgroundTasksResult {
   resumeTask: (taskId: string) => void
   cancelTask: (taskId: string) => void
   cancelChatTasks: () => void
+  clearSettledTasks: (predicate?: (task: BackgroundTaskRecord) => boolean) => void
 }
 
 export function useBackgroundTasks(): BackgroundTasksResult {
@@ -67,6 +69,10 @@ export function useBackgroundTasks(): BackgroundTasksResult {
     requestCancelBackgroundTasks(task => task.sourcePage === 'chat' && task.status !== 'completed' && task.status !== 'canceled' && task.status !== 'failed')
   }, [])
 
+  const clearSettledTasks = useCallback((predicate?: (task: BackgroundTaskRecord) => boolean) => {
+    clearSettledBackgroundTasks(predicate)
+  }, [])
+
   return {
     allTasks: tasks,
     chatTasks,
@@ -76,6 +82,7 @@ export function useBackgroundTasks(): BackgroundTasksResult {
     pauseTask,
     resumeTask,
     cancelTask,
-    cancelChatTasks
+    cancelChatTasks,
+    clearSettledTasks
   }
 }

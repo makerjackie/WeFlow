@@ -6,7 +6,6 @@ import {
   backgroundTaskSourceLabels,
   backgroundTaskStatusLabels
 } from '../../constants'
-import { formatDurationMs } from '../../utils/format'
 import './TaskCenter.scss'
 
 interface TaskCenterProps {
@@ -18,6 +17,25 @@ interface TaskCenterProps {
   onPauseBackgroundTask: (taskId: string) => void
   onResumeBackgroundTask: (taskId: string) => void
   onCancelBackgroundTask: (taskId: string) => void
+  onClearCompletedBackgroundTasks: () => void
+}
+
+const isBackgroundTaskSettled = (task: BackgroundTaskRecord): boolean => (
+  task.status === 'completed' || task.status === 'failed' || task.status === 'canceled'
+)
+
+const parseBackgroundTaskProgress = (progressText?: string): { current: number; total: number; percent: number } | null => {
+  const match = String(progressText || '').match(/(\d[\d,]*)\s*\/\s*(\d[\d,]*)/)
+  if (!match) return null
+  const current = Number(match[1].replace(/,/g, ''))
+  const total = Number(match[2].replace(/,/g, ''))
+  if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 0) return null
+  const safeCurrent = Math.max(0, Math.min(current, total))
+  return {
+    current: safeCurrent,
+    total,
+    percent: Math.max(0, Math.min(100, Math.round((safeCurrent / total) * 100)))
+  }
 }
 
 const TaskCenter: React.FC<TaskCenterProps> = ({
@@ -27,21 +45,28 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   backgroundTasks,
   onPauseBackgroundTask,
   onResumeBackgroundTask,
-  onCancelBackgroundTask
+  onCancelBackgroundTask,
+  onClearCompletedBackgroundTasks
 }) => {
   const hasTasks = exportTasks.length > 0 || backgroundTasks.length > 0
   
   if (!hasTasks) return null
 
-  const activeExportTasks = exportTasks.filter(t => t.status === 'running' || t.status === 'cancel_requested')
   const completedExportTasks = exportTasks.filter(t => t.status === 'success' || t.status === 'error')
+  const completedBackgroundTasks = backgroundTasks.filter(isBackgroundTaskSettled)
+  const hasCompletedTasks = completedExportTasks.length > 0 || completedBackgroundTasks.length > 0
+
+  const handleClearCompletedTasks = () => {
+    onClearCompletedExportTasks()
+    onClearCompletedBackgroundTasks()
+  }
 
   return (
     <div className="task-center">
       <div className="task-center-header">
         <h2 className="title">任务中心</h2>
-        {completedExportTasks.length > 0 && (
-          <button className="clear-btn" onClick={onClearCompletedExportTasks}>
+        {hasCompletedTasks && (
+          <button className="clear-btn" onClick={handleClearCompletedTasks}>
             <Trash2 size={14} /> 清理已完成
           </button>
         )}
@@ -103,14 +128,23 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
             {backgroundTasks.map(bgTask => {
               const isPausable = bgTask.status === 'running'
               const isResumable = bgTask.status === 'paused'
-              const isCancelable = bgTask.status !== 'completed' && bgTask.status !== 'canceled' && bgTask.status !== 'failed'
+              const isCancelable = !isBackgroundTaskSettled(bgTask)
+              const progress = parseBackgroundTaskProgress(bgTask.progressText)
+              const sourceLabel = backgroundTaskSourceLabels[bgTask.sourcePage] || '后台任务'
 
               return (
                 <div key={bgTask.id} className={`task-card bg-task status-${bgTask.status}`}>
                   <div className="task-card-header">
                     <div className="task-info">
-                      <span className="task-title">{backgroundTaskSourceLabels[bgTask.sourcePage] || '后台任务'}</span>
-                      <span className="task-status-badge">{backgroundTaskStatusLabels[bgTask.status]}</span>
+                      <span className="task-title">{bgTask.title || sourceLabel}</span>
+                      <span className="task-source-badge">{sourceLabel}</span>
+                      <span className="task-status-badge">
+                        {bgTask.status === 'running' && <Loader2 className="spin" size={12} />}
+                        {(bgTask.status === 'completed') && <CheckCircle2 size={12} />}
+                        {(bgTask.status === 'failed' || bgTask.status === 'canceled') && <XCircle size={12} />}
+                        {(bgTask.status === 'pause_requested' || bgTask.status === 'cancel_requested') && <Loader2 className="spin" size={12} />}
+                        {backgroundTaskStatusLabels[bgTask.status]}
+                      </span>
                     </div>
                     <div className="task-actions">
                       {isPausable && (
@@ -130,9 +164,20 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
                       )}
                     </div>
                   </div>
-                  {bgTask.progressText && (
-                    <div className="task-progress-text">
-                      {bgTask.progressText}
+                  {(bgTask.detail || bgTask.progressText) && (
+                    <div className="task-progress-area bg-progress-area">
+                      {progress && (
+                        <div className="progress-bar-bg">
+                          <div
+                            className="progress-bar-fill"
+                            style={{ width: `${progress.percent}%` }}
+                          />
+                        </div>
+                      )}
+                      <div className="progress-stats">
+                        {bgTask.detail && <span className="phase">{bgTask.detail}</span>}
+                        {bgTask.progressText && <span className="count">{bgTask.progressText}</span>}
+                      </div>
                     </div>
                   )}
                 </div>

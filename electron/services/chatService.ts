@@ -13,6 +13,7 @@ import { wcdbService } from './wcdbService'
 import { MessageCacheService } from './messageCacheService'
 import { ContactCacheService, ContactCacheEntry } from './contactCacheService'
 import { SessionStatsCacheService, SessionStatsCacheEntry, SessionStatsCacheStats } from './sessionStatsCacheService'
+import { FILE_APP_LOCAL_TYPE_SET } from './export/constants'
 import { GroupMyMessageCountCacheService, GroupMyMessageCountCacheEntry } from './groupMyMessageCountCacheService'
 import { exportCardDiagnosticsService } from './exportCardDiagnosticsService'
 import { voiceTranscribeService } from './voiceTranscribeService'
@@ -181,6 +182,8 @@ interface ExportSessionStats {
   imageMessages: number
   videoMessages: number
   emojiMessages: number
+  /** 文件类消息数量（包含 49 / 34359738417 / 103079215153 / 25769803825 等 localType 变体） */
+  fileMessages: number
   transferMessages: number
   redPacketMessages: number
   callMessages: number
@@ -4233,6 +4236,7 @@ class ChatService {
       imageMessages: Number.isFinite(stats.imageMessages) ? Math.max(0, Math.floor(stats.imageMessages)) : 0,
       videoMessages: Number.isFinite(stats.videoMessages) ? Math.max(0, Math.floor(stats.videoMessages)) : 0,
       emojiMessages: Number.isFinite(stats.emojiMessages) ? Math.max(0, Math.floor(stats.emojiMessages)) : 0,
+      fileMessages: Number.isFinite(stats.fileMessages) ? Math.max(0, Math.floor(stats.fileMessages)) : 0,
       transferMessages: Number.isFinite(stats.transferMessages) ? Math.max(0, Math.floor(stats.transferMessages)) : 0,
       redPacketMessages: Number.isFinite(stats.redPacketMessages) ? Math.max(0, Math.floor(stats.redPacketMessages)) : 0,
       callMessages: Number.isFinite(stats.callMessages) ? Math.max(0, Math.floor(stats.callMessages)) : 0
@@ -4256,6 +4260,7 @@ class ChatService {
       imageMessages: stats.imageMessages,
       videoMessages: stats.videoMessages,
       emojiMessages: stats.emojiMessages,
+      fileMessages: stats.fileMessages,
       transferMessages: stats.transferMessages,
       redPacketMessages: stats.redPacketMessages,
       callMessages: stats.callMessages,
@@ -4511,11 +4516,13 @@ class ChatService {
     transferMessages: number
     redPacketMessages: number
     callMessages: number
+    fileMessages: number
   }> {
     const counters = {
       transferMessages: 0,
       redPacketMessages: 0,
-      callMessages: 0
+      callMessages: 0,
+      fileMessages: 0
     }
 
     const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, false, beginTimestamp, endTimestamp)
@@ -4551,6 +4558,7 @@ class ChatService {
           const xmlType = this.extractType49XmlTypeForStats(content)
           if (xmlType === '2000') counters.transferMessages += 1
           if (xmlType === '2001') counters.redPacketMessages += 1
+          if (xmlType === '6') counters.fileMessages += 1
         }
 
         if (!batch.hasMore || rows.length === 0) break
@@ -4560,6 +4568,60 @@ class ChatService {
     }
 
     return counters
+  }
+
+  /**
+   * 通过 cursor 扫描精确统计指定会话中的文件消息数量。
+   *
+   * 背景：Native 聚合接口 `getSessionMessageTypeStats` 通常只把 localType === 49 且
+   * appmsg type === 6 的消息计为文件；但微信 4.x 中文件消息还存在
+   * 34359738417 / 103079215153 / 25769803825 等 localType 变体，Native 不会计入。
+   * 该函数覆盖 FILE_APP_LOCAL_TYPE_SET 中所有文件变体，作为 Native 统计的兜底/修正。
+   */
+  private async collectFileMessageCountByCursorScan(
+    sessionId: string,
+    beginTimestamp: number = 0,
+    endTimestamp: number = 0
+  ): Promise<number> {
+    let count = 0
+    const fileLocalTypeSet = FILE_APP_LOCAL_TYPE_SET
+    const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, false, beginTimestamp, endTimestamp)
+    if (!cursorResult.success || !cursorResult.cursor) {
+      return count
+    }
+
+    const cursor = cursorResult.cursor
+    try {
+      while (true) {
+        const batch = await wcdbService.fetchMessageBatch(cursor)
+        if (!batch.success) break
+        const rows = Array.isArray(batch.rows) ? batch.rows as Record<string, any>[] : []
+        for (const row of rows) {
+          const localType = this.getRowInt(row, ['local_type'], 1)
+          if (!fileLocalTypeSet.has(localType)) continue
+
+          // 文件消息变体中，49 是通用 appmsg，需要解析 XML 判断 type === 6；
+          // 34359738417 / 103079215153 / 25769803825 等变体几乎专用于文件，直接计数即可，
+          // 避免大量 CPU 密集型 XML 解码/正则解析。
+          if (localType !== 49) {
+            count += 1
+            continue
+          }
+
+          const rawMessageContent = row.message_content
+          const rawCompressContent = row.compress_content
+          const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
+          const xmlType = this.extractType49XmlTypeForStats(content)
+          if (xmlType === '6') count += 1
+        }
+
+        if (!batch.hasMore || rows.length === 0) break
+      }
+    } finally {
+      await wcdbService.closeMessageCursor(cursor)
+    }
+
+    return count
   }
 
   private async collectSessionExportStatsByCursorScan(
@@ -4574,6 +4636,7 @@ class ChatService {
       imageMessages: 0,
       videoMessages: 0,
       emojiMessages: 0,
+      fileMessages: 0,
       transferMessages: 0,
       redPacketMessages: 0,
       callMessages: 0
@@ -4609,13 +4672,22 @@ class ChatService {
           if (localType === 50) stats.callMessages += 1
           if (localType === 8589934592049) stats.transferMessages += 1
           if (localType === 8594229559345) stats.redPacketMessages += 1
-          if (localType === 49) {
-            const rawMessageContent = row.message_content
-            const rawCompressContent = row.compress_content
-            const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
-            const xmlType = this.extractType49XmlTypeForStats(content)
-            if (xmlType === '2000') stats.transferMessages += 1
-            if (xmlType === '2001') stats.redPacketMessages += 1
+          // 文件、转账、红包等共享 appmsg 类型的 localType 变体，需要解析 XML 进一步区分。
+          // 非 49 的文件消息变体（34359738417 / 103079215153 / 25769803825）几乎专用于文件，
+          // 跳过 XML 解析直接计为文件消息，以降低 cursor 扫描开销。
+          if (FILE_APP_LOCAL_TYPE_SET.has(localType)) {
+            if (localType !== 49) {
+              stats.fileMessages += 1
+            } else {
+              const rawMessageContent = row.message_content
+              const rawCompressContent = row.compress_content
+              const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
+              const xmlType = this.extractType49XmlTypeForStats(content)
+              if (xmlType === '2000') stats.transferMessages += 1
+              if (xmlType === '2001') stats.redPacketMessages += 1
+              // appmsg type === 6 表示普通文件附件
+              if (xmlType === '6') stats.fileMessages += 1
+            }
           }
 
           const createTime = this.getRowInt(
@@ -4679,6 +4751,7 @@ class ChatService {
       imageMessages: 0,
       videoMessages: 0,
       emojiMessages: 0,
+      fileMessages: 0,
       transferMessages: 0,
       redPacketMessages: 0,
       callMessages: 0
@@ -4700,6 +4773,8 @@ class ChatService {
     stats.imageMessages = Math.max(0, Math.floor(Number(data.image_messages || 0)))
     stats.videoMessages = Math.max(0, Math.floor(Number(data.video_messages || 0)))
     stats.emojiMessages = Math.max(0, Math.floor(Number(data.emoji_messages || 0)))
+    const hasNativeFileMessages = Object.prototype.hasOwnProperty.call(data, 'file_messages')
+    stats.fileMessages = Math.max(0, Math.floor(Number(data.file_messages || 0)))
     stats.callMessages = Math.max(0, Math.floor(Number(data.call_messages || 0)))
     stats.transferMessages = Math.max(0, Math.floor(Number(data.transfer_messages || 0)))
     stats.redPacketMessages = Math.max(0, Math.floor(Number(data.red_packet_messages || 0)))
@@ -4715,8 +4790,19 @@ class ChatService {
         stats.transferMessages = preciseCounters.transferMessages
         stats.redPacketMessages = preciseCounters.redPacketMessages
         stats.callMessages = preciseCounters.callMessages
+        stats.fileMessages = preciseCounters.fileMessages
       } catch {
         // 保留 native 聚合结果作为兜底
+      }
+    } else {
+      // 新版 native 聚合会返回 file_messages；仅兼容旧 DLL 缺少该字段时再走 cursor 兜底。
+      if (!hasNativeFileMessages) {
+        try {
+          const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
+          stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)
+        } catch {
+          // 保留 native 聚合结果作为兜底
+        }
       }
     }
 
@@ -4742,6 +4828,7 @@ class ChatService {
       imageMessages: Math.max(0, Math.floor(Number(row?.image_messages || 0))),
       videoMessages: Math.max(0, Math.floor(Number(row?.video_messages || 0))),
       emojiMessages: Math.max(0, Math.floor(Number(row?.emoji_messages || 0))),
+      fileMessages: Math.max(0, Math.floor(Number(row?.file_messages || 0))),
       callMessages: Math.max(0, Math.floor(Number(row?.call_messages || 0))),
       transferMessages: Math.max(0, Math.floor(Number(row?.transfer_messages || 0))),
       redPacketMessages: Math.max(0, Math.floor(Number(row?.red_packet_messages || 0)))
@@ -4864,6 +4951,7 @@ class ChatService {
       imageMessages: 0,
       videoMessages: 0,
       emojiMessages: 0,
+      fileMessages: 0,
       transferMessages: 0,
       redPacketMessages: 0,
       callMessages: 0
@@ -4992,6 +5080,7 @@ class ChatService {
     }
 
     const nativeBatchStats: Record<string, ExportSessionStats> = {}
+    const nativeBatchHasFileMessages: Record<string, boolean> = {}
     let hasNativeBatchStats = false
     if (!preferAccurateSpecialTypes) {
       try {
@@ -5006,6 +5095,7 @@ class ChatService {
           for (const sessionId of normalizedSessionIds) {
             const row = nativeBatch.data?.[sessionId] as Record<string, any> | undefined
             if (!row || typeof row !== 'object') continue
+            nativeBatchHasFileMessages[sessionId] = Object.prototype.hasOwnProperty.call(row, 'file_messages')
             nativeBatchStats[sessionId] = this.toExportSessionStatsFromNativeTypeRow(sessionId, row, {
               updateGroupHint: beginTimestamp <= 0 && endTimestamp <= 0
             })
@@ -5019,9 +5109,10 @@ class ChatService {
       }
     }
 
-    await this.forEachWithConcurrency(normalizedSessionIds, 3, async (sessionId) => {
+    await this.forEachWithConcurrency(normalizedSessionIds, 6, async (sessionId) => {
       try {
-        const stats = hasNativeBatchStats && nativeBatchStats[sessionId]
+        const fromNativeBatch = hasNativeBatchStats && nativeBatchStats[sessionId]
+        const stats = fromNativeBatch
           ? { ...nativeBatchStats[sessionId] }
           : await this.collectSessionExportStats(
             sessionId,
@@ -5030,6 +5121,15 @@ class ChatService {
             beginTimestamp,
             endTimestamp
           )
+        // 新版 native 批量统计会返回 file_messages；仅兼容旧 DLL 缺少该字段时再走 cursor 兜底。
+        if (fromNativeBatch && !nativeBatchHasFileMessages[sessionId]) {
+          try {
+            const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
+            stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)
+          } catch {
+            // 保留 native 批量结果作为兜底
+          }
+        }
         if (sessionId.endsWith('@chatroom')) {
           if (shouldLoadGroupMemberCount) {
             stats.groupMemberCount = typeof memberCountMap[sessionId] === 'number'
@@ -9115,9 +9215,12 @@ class ChatService {
           const t6 = Date.now()
 
 
-          if (result.success && result.transcript) {
-
-            this.cacheVoiceTranscript(cacheKey, result.transcript)
+          if (result.success) {
+            const transcript = String(result.transcript || '').trim()
+            if (transcript) {
+              this.cacheVoiceTranscript(cacheKey, transcript)
+            }
+            return { success: true, transcript }
           } else {
             console.error(`[Transcribe] 转写失败: ${result.error}`)
           }

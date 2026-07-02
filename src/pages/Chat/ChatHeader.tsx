@@ -35,7 +35,9 @@ export interface ChatHeaderProps {
   isPreparingExportDialog: boolean
   isBatchTranscribing: boolean
   runningBatchVoiceTaskType?: BatchVoiceTaskType
+  batchVoiceProgress?: { current: number; total: number }
   isBatchDecrypting: boolean
+  batchImageDecryptProgress?: { current: number; total: number }
   isTriggeringSessionInsight: boolean
   isRefreshingMessages: boolean
   isLoadingMessages: boolean
@@ -72,7 +74,9 @@ function ChatHeader({
   isPreparingExportDialog,
   isBatchTranscribing,
   runningBatchVoiceTaskType,
+  batchVoiceProgress,
   isBatchDecrypting,
+  batchImageDecryptProgress,
   isTriggeringSessionInsight,
   isRefreshingMessages,
   isLoadingMessages,
@@ -98,8 +102,17 @@ function ChatHeader({
       ? '正在准备导出模块'
       : '导出当前会话'
   const batchVoiceTitle = isBatchTranscribing
-    ? `${runningBatchVoiceTaskType === 'decrypt' ? '批量语音解密' : '批量转写'}中，可在导出页任务中心查看进度`
+    ? `${runningBatchVoiceTaskType === 'decrypt' ? '批量语音解密' : '批量转写'}中${batchVoiceProgress?.total ? `：${batchVoiceProgress.current}/${batchVoiceProgress.total}（${Math.round((batchVoiceProgress.current / Math.max(1, batchVoiceProgress.total)) * 100)}%）` : ''}，可在导出页任务中心查看进度`
     : '批量语音处理'
+  const batchVoiceProgressPercent = batchVoiceProgress?.total
+    ? Math.max(0, Math.min(100, Math.round((batchVoiceProgress.current / Math.max(1, batchVoiceProgress.total)) * 100)))
+    : 0
+  const batchImageDecryptProgressPercent = batchImageDecryptProgress?.total
+    ? Math.max(0, Math.min(100, Math.round((batchImageDecryptProgress.current / Math.max(1, batchImageDecryptProgress.total)) * 100)))
+    : 0
+  const batchImageDecryptTitle = isBatchDecrypting
+    ? `批量解密图片中${batchImageDecryptProgress?.total ? `：${batchImageDecryptProgress.current}/${batchImageDecryptProgress.total}（${batchImageDecryptProgressPercent}%）` : ''}，可在导出页任务中心查看进度`
+    : '批量解密图片'
 
   return (
     <div className="message-header">
@@ -174,8 +187,16 @@ function ChatHeader({
             onClick={onBatchTranscribe}
             disabled={!currentSessionId}
             title={batchVoiceTitle}
+            aria-label={batchVoiceTitle}
           >
-            {isBatchTranscribing ? <Loader2 size={18} className="spin" /> : <Mic size={18} />}
+            {isBatchTranscribing ? (
+              <>
+                <Loader2 size={18} className="spin" />
+                {batchVoiceProgress?.total ? (
+                  <span className="batch-progress-badge">{batchVoiceProgressPercent}%</span>
+                ) : null}
+              </>
+            ) : <Mic size={18} />}
           </button>
         )}
         {!standaloneSessionWindow && (
@@ -183,9 +204,17 @@ function ChatHeader({
             className={`icon-btn batch-decrypt-btn${isBatchDecrypting ? ' transcribing' : ''}`}
             onClick={onBatchDecrypt}
             disabled={!currentSessionId}
-            title={isBatchDecrypting ? '批量解密中' : '批量解密图片'}
+            title={batchImageDecryptTitle}
+            aria-label={batchImageDecryptTitle}
           >
-            {isBatchDecrypting ? <Loader2 size={18} className="spin" /> : <ImageIcon size={18} />}
+            {isBatchDecrypting ? (
+              <>
+                <Loader2 size={18} className="spin" />
+                {batchImageDecryptProgress?.total ? (
+                  <span className="batch-progress-badge">{batchImageDecryptProgressPercent}%</span>
+                ) : null}
+              </>
+            ) : <ImageIcon size={18} />}
           </button>
         )}
         <div className="jump-calendar-anchor" ref={jumpCalendarWrapRef}>
@@ -247,7 +276,11 @@ function areEqual(prev: ChatHeaderProps, next: ChatHeaderProps) {
     prev.isPreparingExportDialog === next.isPreparingExportDialog &&
     prev.isBatchTranscribing === next.isBatchTranscribing &&
     prev.runningBatchVoiceTaskType === next.runningBatchVoiceTaskType &&
+    prev.batchVoiceProgress?.current === next.batchVoiceProgress?.current &&
+    prev.batchVoiceProgress?.total === next.batchVoiceProgress?.total &&
     prev.isBatchDecrypting === next.isBatchDecrypting &&
+    prev.batchImageDecryptProgress?.current === next.batchImageDecryptProgress?.current &&
+    prev.batchImageDecryptProgress?.total === next.batchImageDecryptProgress?.total &&
     prev.isTriggeringSessionInsight === next.isTriggeringSessionInsight &&
     prev.isRefreshingMessages === next.isRefreshingMessages &&
     prev.isLoadingMessages === next.isLoadingMessages &&

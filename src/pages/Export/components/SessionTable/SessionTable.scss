@@ -103,6 +103,42 @@
         }
       }
     }
+
+    .st-refresh-stats-btn {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 17px;
+      border: 1px solid color-mix(in srgb, var(--border-color) 58%, transparent);
+      background: var(--bg-main, var(--bg-secondary));
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition:
+        background 0.18s ease,
+        border-color 0.18s ease,
+        color 0.18s ease,
+        transform 0.18s ease,
+        opacity 0.18s ease;
+
+      &:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--primary) 10%, var(--bg-surface));
+        border-color: color-mix(in srgb, var(--primary) 40%, var(--border-color));
+        color: var(--primary);
+        transform: translateY(-1px);
+      }
+
+      &:disabled {
+        cursor: default;
+        opacity: 0.58;
+      }
+
+      &.refreshing svg {
+        animation: stRefreshStatsSpin 0.9s linear infinite;
+      }
+    }
   }
 
   // ── Grid Layout Definition ───────────────────────────────────────────
@@ -145,6 +181,7 @@
   // ── List Body ───────────────────────────────────────────────────────────
   .table-body {
     flex: 1;
+    position: relative;
     overflow: hidden; // virtuoso handles scrolling
 
     .empty-state {
@@ -154,6 +191,66 @@
       height: 100px;
       color: var(--text-tertiary);
       font-size: 14px;
+    }
+
+    .st-metrics-status {
+      position: absolute;
+      left: 50%;
+      bottom: 18px;
+      z-index: 4;
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      max-width: min(520px, calc(100% - 48px));
+      min-height: 36px;
+      padding: 8px 12px;
+      border-radius: 18px;
+      border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border-color));
+      background:
+        linear-gradient(135deg,
+          color-mix(in srgb, var(--primary) 10%, var(--bg-surface)),
+          color-mix(in srgb, var(--bg-surface) 92%, var(--bg-main))
+        );
+      box-shadow:
+        0 12px 30px color-mix(in srgb, var(--shadow-color) 18%, transparent),
+        0 1px 0 color-mix(in srgb, #fff 55%, transparent) inset;
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.35;
+      pointer-events: none;
+      transform: translateX(-50%);
+      animation: stMetricsStatusEnter 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+      &.leaving {
+        animation: stMetricsStatusExit 0.24s ease both;
+      }
+
+      .st-metrics-status-dot {
+        position: relative;
+        width: 8px;
+        height: 8px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: var(--primary);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
+
+        &::after {
+          content: '';
+          position: absolute;
+          inset: -5px;
+          border-radius: inherit;
+          border: 1px solid color-mix(in srgb, var(--primary) 36%, transparent);
+          animation: stMetricsStatusPulse 1.2s ease-out infinite;
+        }
+      }
+
+      .st-metrics-status-count {
+        flex: 0 0 auto;
+        padding-left: 2px;
+        color: var(--primary);
+        font-weight: 600;
+      }
     }
   }
 
@@ -287,4 +384,182 @@
       color: var(--primary);
     }
   }
+}
+
+// ── Skeleton Loading (参考「我的足迹」的 skeleton-shimmer 风格) ─────────
+.st-skeleton-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 24px;
+
+  .st-skeleton-header {
+    display: grid;
+    grid-template-columns: 48px minmax(200px, 1fr) 80px 120px 60px 60px 60px 60px 60px 80px;
+    align-items: center;
+    gap: 8px;
+    height: 44px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 40%, transparent);
+
+    .st-skeleton-cell {
+      height: 14px;
+      border-radius: 4px;
+
+      &:nth-child(3),
+      &:nth-child(4),
+      &:nth-child(5),
+      &:nth-child(6),
+      &:nth-child(7),
+      &:nth-child(8),
+      &:nth-child(9) {
+        margin-left: auto;
+        width: 60%;
+      }
+
+      &:last-child {
+        margin: 0 auto;
+        width: 50%;
+      }
+    }
+  }
+
+  .st-skeleton-rows {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+
+    .st-skeleton-row {
+      display: grid;
+      grid-template-columns: 48px minmax(200px, 1fr) 80px 120px 60px 60px 60px 60px 60px 80px;
+      align-items: center;
+      gap: 8px;
+      height: 64px;
+      border-bottom: 1px solid color-mix(in srgb, var(--border-color) 20%, transparent);
+      padding: 0;
+
+      .st-skeleton-checkbox {
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+      }
+
+      .st-skeleton-info {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+
+        .st-skeleton-avatar {
+          width: 40px;
+          height: 40px;
+          border-radius: 8px;
+          flex-shrink: 0;
+        }
+
+        .st-skeleton-text {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          flex: 1;
+          overflow: hidden;
+
+          .st-skeleton-line {
+            height: 14px;
+            border-radius: 4px;
+            width: 60%;
+
+            &.short {
+              width: 40%;
+            }
+          }
+        }
+      }
+
+      .st-skeleton-stat {
+        height: 14px;
+        border-radius: 4px;
+        width: 60%;
+        margin-left: auto;
+      }
+    }
+  }
+}
+
+.st-skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-tertiary) 6%, transparent);
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--bg-primary) 50%, transparent),
+      transparent
+    );
+    transform: translateX(-100%);
+    animation: stShimmer 1.5s infinite;
+  }
+}
+
+@keyframes stShimmer {
+  100% { transform: translateX(100%); }
+}
+
+// 行级统计 shimmer 占位与数字淡入
+.st-stat-shimmer {
+  display: inline-block;
+  width: 20px;
+  height: 10px;
+  border-radius: 4px;
+  @extend .st-skeleton-shimmer;
+}
+
+.st-stat-fade-in {
+  animation: stStatFadeIn 0.2s ease forwards;
+}
+
+@keyframes stStatFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes stMetricsStatusEnter {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@keyframes stMetricsStatusExit {
+  from {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes stMetricsStatusPulse {
+  from {
+    opacity: 0.65;
+    transform: scale(0.65);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+}
+
+@keyframes stRefreshStatsSpin {
+  to { transform: rotate(360deg); }
 }

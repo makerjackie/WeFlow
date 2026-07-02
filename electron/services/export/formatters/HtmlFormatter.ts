@@ -141,6 +141,7 @@ export class HtmlFormatter {
               exportFiles: options.exportFiles,
               maxFileSizeMb: options.maxFileSizeMb,
               exportVoiceAsText: options.exportVoiceAsText,
+              exportConflictStrategy: options.exportConflictStrategy,
               includeVideoPoster: options.format === 'html',
               includeVoiceWithTranscript: true,
               exportVideos: options.exportVideos,

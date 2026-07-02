@@ -38,7 +38,7 @@ interface GroupMessageRank {
 }
 
 type AnalysisFunction = 'members' | 'memberMessages' | 'memberAnalytics' | 'ranking' | 'activeHours' | 'mediaStats'
-type MemberExportFormat = 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'txt' | 'excel' | 'weclone'
+type MemberExportFormat = 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone'
 
 interface MemberMessageExportOptions {
   format: MemberExportFormat
@@ -234,6 +234,7 @@ function GroupAnalyticsPage() {
     { value: 'chatlab', label: 'ChatLab', desc: '标准格式，支持其他软件导入' },
     { value: 'chatlab-jsonl', label: 'ChatLab JSONL', desc: '流式格式，适合大量消息' },
     { value: 'html', label: 'HTML', desc: '网页格式，可直接浏览' },
+    { value: 'markdown', label: 'Markdown', desc: '支持文本、图片与链接，适合 AI 场景' },
     { value: 'weclone', label: 'WeClone CSV', desc: 'WeClone 兼容字段格式（CSV）' }
   ]), [])
   const displayNameOptions = useMemo<Array<{
@@ -886,7 +887,7 @@ function GroupAnalyticsPage() {
   const handleMemberExportFormatChange = (format: MemberExportFormat) => {
     setMemberExportOptions(prev => {
       const next = { ...prev, format }
-      if (format === 'html') {
+      if (format === 'html' || format === 'markdown') {
         return {
           ...next,
           exportMedia: true,

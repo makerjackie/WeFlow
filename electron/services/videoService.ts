@@ -1,5 +1,6 @@
 ﻿import { join } from 'path'
-import { existsSync, readdirSync, statSync, readFileSync, appendFileSync, mkdirSync } from 'fs'
+import { constants, existsSync, mkdirSync } from 'fs'
+import { access, appendFile, readFile, readdir } from 'fs/promises'
 import { pathToFileURL } from 'url'
 import { app } from 'electron'
 import { ConfigService } from './config'
@@ -25,30 +26,68 @@ interface VideoIndexEntry {
 
 type PosterFormat = 'dataUrl' | 'fileUrl'
 
+const pathExists = async (filePath: string): Promise<boolean> => {
+  try {
+    await access(filePath, constants.F_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
 class VideoService {
   private configService: ConfigService
   private hardlinkResolveCache = new Map<string, TimedCacheEntry<string | null>>()
   private videoInfoCache = new Map<string, TimedCacheEntry<VideoInfo>>()
   private videoDirIndexCache = new Map<string, TimedCacheEntry<Map<string, VideoIndexEntry>>>()
   private pendingVideoInfo = new Map<string, Promise<VideoInfo>>()
+  private pendingVideoDirIndex = new Map<string, Promise<Map<string, VideoIndexEntry>>>()
   private readonly hardlinkCacheTtlMs = 10 * 60 * 1000
   private readonly videoInfoCacheTtlMs = 2 * 60 * 1000
   private readonly videoIndexCacheTtlMs = 90 * 1000
   private readonly maxCacheEntries = 2000
   private readonly maxIndexEntries = 6
+  private logFlushTimer: ReturnType<typeof setTimeout> | null = null
+  private pendingLogLines: string[] = []
+  private readonly logFlushDelayMs = 200
+  private readonly maxPendingLogLines = 600
 
   constructor() {
     this.configService = new ConfigService()
   }
 
   private log(message: string, meta?: Record<string, unknown>): void {
+    if (!this.configService.get('logEnabled')) return
+    const timestamp = new Date().toISOString()
+    const metaStr = meta ? ` ${JSON.stringify(meta)}` : ''
+    this.pendingLogLines.push(`[${timestamp}] [VideoService] ${message}${metaStr}\n`)
+    while (this.pendingLogLines.length > this.maxPendingLogLines) {
+      this.pendingLogLines.shift()
+    }
+    if (this.logFlushTimer) return
+    this.logFlushTimer = setTimeout(() => {
+      this.logFlushTimer = null
+      void this.flushPendingLogs()
+    }, this.logFlushDelayMs)
+  }
+
+  private async flushPendingLogs(): Promise<void> {
+    if (this.pendingLogLines.length === 0) return
+    const lines = this.pendingLogLines.splice(0, this.pendingLogLines.length).join('')
     try {
-      const timestamp = new Date().toISOString()
-      const metaStr = meta ? ` ${JSON.stringify(meta)}` : ''
       const logDir = join(app.getPath('userData'), 'logs')
       if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true })
-      appendFileSync(join(logDir, 'wcdb.log'), `[${timestamp}] [VideoService] ${message}${metaStr}\n`, 'utf8')
-    } catch { }
+      await appendFile(join(logDir, 'wcdb.log'), lines, 'utf8')
+    } catch {
+      // Logging is diagnostic only; video browsing must never wait on it.
+    } finally {
+      if (this.pendingLogLines.length > 0 && this.logFlushTimer === null) {
+        this.logFlushTimer = setTimeout(() => {
+          this.logFlushTimer = null
+          void this.flushPendingLogs()
+        }, this.logFlushDelayMs)
+      }
+    }
   }
 
   private readTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
@@ -272,21 +311,33 @@ class VideoService {
     void md5List
   }
 
-  private fileToPosterUrl(filePath: string | undefined, mimeType: string, posterFormat: PosterFormat): string | undefined {
+  private async fileToPosterUrl(filePath: string | undefined, mimeType: string, posterFormat: PosterFormat): Promise<string | undefined> {
     try {
-      if (!filePath || !existsSync(filePath)) return undefined
+      if (!filePath || !(await pathExists(filePath))) return undefined
       if (posterFormat === 'fileUrl') return pathToFileURL(filePath).toString()
-      const buffer = readFileSync(filePath)
+      const buffer = await readFile(filePath)
       return `data:${mimeType};base64,${buffer.toString('base64')}`
     } catch {
       return undefined
     }
   }
 
-  private getOrBuildVideoIndex(videoBaseDir: string): Map<string, VideoIndexEntry> {
+  private async getOrBuildVideoIndex(videoBaseDir: string): Promise<Map<string, VideoIndexEntry>> {
     const cached = this.readTimedCache(this.videoDirIndexCache, videoBaseDir)
     if (cached) return cached
+    const pending = this.pendingVideoDirIndex.get(videoBaseDir)
+    if (pending) return pending
 
+    const task = this.buildVideoIndex(videoBaseDir)
+    this.pendingVideoDirIndex.set(videoBaseDir, task)
+    try {
+      return await task
+    } finally {
+      this.pendingVideoDirIndex.delete(videoBaseDir)
+    }
+  }
+
+  private async buildVideoIndex(videoBaseDir: string): Promise<Map<string, VideoIndexEntry>> {
     const index = new Map<string, VideoIndexEntry>()
     const ensureEntry = (key: string): VideoIndexEntry => {
       let entry = index.get(key)
@@ -298,22 +349,18 @@ class VideoService {
     }
 
     try {
-      const yearMonthDirs = readdirSync(videoBaseDir)
-        .filter((dir) => {
-          const dirPath = join(videoBaseDir, dir)
-          try {
-            return statSync(dirPath).isDirectory()
-          } catch {
-            return false
-          }
-        })
+      const yearMonthDirs = (await readdir(videoBaseDir, { withFileTypes: true }))
+        .filter((dir) => dir.isDirectory())
+        .map((dir) => dir.name)
         .sort((a, b) => b.localeCompare(a))
 
       for (const yearMonth of yearMonthDirs) {
         const dirPath = join(videoBaseDir, yearMonth)
         let files: string[] = []
         try {
-          files = readdirSync(dirPath)
+          files = (await readdir(dirPath, { withFileTypes: true }))
+            .filter((entry) => entry.isFile())
+            .map((entry) => entry.name)
         } catch {
           continue
         }
@@ -369,12 +416,12 @@ class VideoService {
     return index
   }
 
-  private getVideoInfoFromIndex(
+  private async getVideoInfoFromIndex(
     index: Map<string, VideoIndexEntry>,
     md5: string,
     includePoster = true,
     posterFormat: PosterFormat = 'dataUrl'
-  ): VideoInfo | null {
+  ): Promise<VideoInfo | null> {
     const normalizedMd5 = String(md5 || '').trim().toLowerCase()
     if (!normalizedMd5) return null
 
@@ -389,7 +436,7 @@ class VideoService {
     for (const key of candidates) {
       const entry = index.get(key)
       if (!entry?.videoPath) continue
-      if (!existsSync(entry.videoPath)) continue
+      if (!(await pathExists(entry.videoPath))) continue
       if (!includePoster) {
         return {
           videoUrl: entry.videoPath,
@@ -398,8 +445,8 @@ class VideoService {
       }
       return {
         videoUrl: entry.videoPath,
-        coverUrl: this.fileToPosterUrl(entry.coverPath, 'image/jpeg', posterFormat),
-        thumbUrl: this.fileToPosterUrl(entry.thumbPath, 'image/jpeg', posterFormat),
+        coverUrl: await this.fileToPosterUrl(entry.coverPath, 'image/jpeg', posterFormat),
+        thumbUrl: await this.fileToPosterUrl(entry.thumbPath, 'image/jpeg', posterFormat),
         exists: true
       }
     }
@@ -424,28 +471,22 @@ class VideoService {
     return String(fallback?.[1] || '').toLowerCase()
   }
 
-  private fallbackScanVideo(
+  private async fallbackScanVideo(
     videoBaseDir: string,
     realVideoMd5: string,
     includePoster = true,
     posterFormat: PosterFormat = 'dataUrl'
-  ): VideoInfo | null {
+  ): Promise<VideoInfo | null> {
     try {
-      const yearMonthDirs = readdirSync(videoBaseDir)
-        .filter((dir) => {
-          const dirPath = join(videoBaseDir, dir)
-          try {
-            return statSync(dirPath).isDirectory()
-          } catch {
-            return false
-          }
-        })
+      const yearMonthDirs = (await readdir(videoBaseDir, { withFileTypes: true }))
+        .filter((dir) => dir.isDirectory())
+        .map((dir) => dir.name)
         .sort((a, b) => b.localeCompare(a))
 
       for (const yearMonth of yearMonthDirs) {
         const dirPath = join(videoBaseDir, yearMonth)
         const videoPath = join(dirPath, `${realVideoMd5}.mp4`)
-        if (!existsSync(videoPath)) continue
+        if (!(await pathExists(videoPath))) continue
         if (!includePoster) {
           return {
             videoUrl: videoPath,
@@ -457,8 +498,8 @@ class VideoService {
         const thumbPath = join(dirPath, `${baseMd5}_thumb.jpg`)
         return {
           videoUrl: videoPath,
-          coverUrl: this.fileToPosterUrl(coverPath, 'image/jpeg', posterFormat),
-          thumbUrl: this.fileToPosterUrl(thumbPath, 'image/jpeg', posterFormat),
+          coverUrl: await this.fileToPosterUrl(coverPath, 'image/jpeg', posterFormat),
+          thumbUrl: await this.fileToPosterUrl(thumbPath, 'image/jpeg', posterFormat),
           exists: true
         }
       }
@@ -506,21 +547,21 @@ class VideoService {
       const realVideoMd5 = this.normalizeVideoLookupKey(normalizedMd5) || normalizedMd5
       const videoBaseDir = this.resolveVideoBaseDir(dbPath, wxid)
 
-      if (!existsSync(videoBaseDir)) {
+      if (!(await pathExists(videoBaseDir))) {
         const miss = { exists: false }
         this.writeTimedCache(this.videoInfoCache, cacheKey, miss, this.videoInfoCacheTtlMs, this.maxCacheEntries)
         return miss
       }
 
-      const index = this.getOrBuildVideoIndex(videoBaseDir)
-      const indexed = this.getVideoInfoFromIndex(index, realVideoMd5, includePoster, posterFormat)
+      const index = await this.getOrBuildVideoIndex(videoBaseDir)
+      const indexed = await this.getVideoInfoFromIndex(index, realVideoMd5, includePoster, posterFormat)
       if (indexed) {
         const withPoster = await this.ensurePoster(indexed, includePoster, posterFormat)
         this.writeTimedCache(this.videoInfoCache, cacheKey, withPoster, this.videoInfoCacheTtlMs, this.maxCacheEntries)
         return withPoster
       }
 
-      const fallback = this.fallbackScanVideo(videoBaseDir, realVideoMd5, includePoster, posterFormat)
+      const fallback = await this.fallbackScanVideo(videoBaseDir, realVideoMd5, includePoster, posterFormat)
       if (fallback) {
         const withPoster = await this.ensurePoster(fallback, includePoster, posterFormat)
         this.writeTimedCache(this.videoInfoCache, cacheKey, withPoster, this.videoInfoCacheTtlMs, this.maxCacheEntries)
@@ -539,6 +580,38 @@ class VideoService {
     } finally {
       this.pendingVideoInfo.delete(cacheKey)
     }
+  }
+
+  async getVideoInfoBatch(
+    videoMd5List: string[],
+    options?: { includePoster?: boolean; posterFormat?: PosterFormat }
+  ): Promise<Array<{ index: number; md5: string; info: VideoInfo }>> {
+    const rows: Array<{ index: number; md5: string; info: VideoInfo }> = new Array(videoMd5List.length)
+    const seen = new Map<string, Promise<VideoInfo>>()
+    for (let index = 0; index < videoMd5List.length; index += 1) {
+      const md5 = String(videoMd5List[index] || '').trim().toLowerCase()
+      if (!md5) {
+        rows[index] = { index, md5, info: { exists: false } }
+        continue
+      }
+      let task = seen.get(md5)
+      if (!task) {
+        task = this.getVideoInfo(md5, options)
+        seen.set(md5, task)
+      }
+      rows[index] = { index, md5, info: { exists: false } }
+    }
+
+    await Promise.all(rows.map(async (row, index) => {
+      if (!row.md5) return
+      try {
+        rows[index] = { ...row, info: await seen.get(row.md5)! }
+      } catch {
+        rows[index] = { ...row, info: { exists: false } }
+      }
+    }))
+
+    return rows
   }
 
   /**

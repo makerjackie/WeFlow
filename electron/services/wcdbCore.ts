@@ -1,5 +1,6 @@
 import { join, dirname, basename } from 'path'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
+import { appendFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import * as fzstd from 'fzstd'
 import { expandHomePath } from '../utils/pathUtils'
@@ -22,6 +23,23 @@ function cleanAccountDirName(dirName: string): string {
   const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
   if (suffixMatch) return suffixMatch[1]
   return trimmed
+}
+
+type MediaStreamPageCacheEntry = {
+  key: string
+  startOffset: number
+  endOffset: number
+  items: any[]
+  hasMore: boolean
+  updatedAt: number
+}
+
+type MediaStreamInflightEntry = {
+  startOffset: number
+  endOffset: number
+  promise: Promise<void>
+  resolve: () => void
+  finished: boolean
 }
 
 export class WcdbCore {
@@ -136,6 +154,9 @@ export class WcdbCore {
   private monitorPipePath: string = ''
 
 
+  private displayNameCache: Map<string, { displayName: string; updatedAt: number }> = new Map()
+  private readonly displayNameCacheTtlMs = 10 * 60 * 1000
+  private readonly displayNameCacheMaxEntries = 20000
   private avatarUrlCache: Map<string, { url?: string; updatedAt: number }> = new Map()
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
   private imageHardlinkCache: Map<string, { result: { success: boolean; data?: any; error?: string }; updatedAt: number }> = new Map()
@@ -145,10 +166,18 @@ export class WcdbCore {
   private mediaStreamSessionCache: Array<{ sessionId: string; displayName: string; sortTimestamp: number }> | null = null
   private mediaStreamSessionCacheAt = 0
   private readonly mediaStreamSessionCacheTtlMs = 12 * 1000
+  private mediaStreamPageCache: Map<string, MediaStreamPageCacheEntry[]> = new Map()
+  private mediaStreamInflight = new Map<string, MediaStreamInflightEntry[]>()
+  private readonly mediaStreamPageCacheTtlMs = 30 * 1000
+  private readonly mediaStreamPageCacheMaxEntries = 16
   private logTimer: NodeJS.Timeout | null = null
+  private logFlushTimer: ReturnType<typeof setTimeout> | null = null
+  private pendingLogLines: string[] = []
   private lastLogTail: string | null = null
   private lastResolvedLogPath: string | null = null
   private lastCursorForceReopenAt = 0
+  private readonly maxPendingLogLines = 1200
+  private readonly logFlushDelayMs = 200
   private readonly cursorForceReopenCooldownMs = 15000
 
   setPaths(resourcesPath: string, userDataPath: string): void {
@@ -371,28 +400,52 @@ export class WcdbCore {
 
   private writeLog(message: string, force = false): void {
     if (!force && !this.isLogEnabled()) return
-    const line = `[${new Date().toISOString()}] ${message}`
+    const line = `[${new Date().toISOString()}] ${message}\n`
+    this.pendingLogLines.push(line)
+    while (this.pendingLogLines.length > this.maxPendingLogLines) {
+      this.pendingLogLines.shift()
+    }
 
+    if (this.logFlushTimer) return
+    this.logFlushTimer = setTimeout(() => {
+      this.logFlushTimer = null
+      void this.flushPendingLogs()
+    }, this.logFlushDelayMs)
+  }
+
+  private getLogFileCandidates(): string[] {
     const candidates: string[] = []
     if (this.userDataPath) candidates.push(join(this.userDataPath, 'logs', 'wcdb.log'))
     if (process.env.WCDB_LOG_DIR) candidates.push(join(process.env.WCDB_LOG_DIR, 'logs', 'wcdb.log'))
     candidates.push(join(process.cwd(), 'logs', 'wcdb.log'))
     candidates.push(join(tmpdir(), 'weflow-wcdb.log'))
+    return Array.from(new Set(candidates))
+  }
 
-    const uniq = Array.from(new Set(candidates))
-    for (const filePath of uniq) {
+  private async flushPendingLogs(): Promise<void> {
+    if (this.pendingLogLines.length === 0) return
+    const lines = this.pendingLogLines.splice(0, this.pendingLogLines.length).join('')
+    const candidates = this.getLogFileCandidates()
+
+    for (const filePath of candidates) {
       try {
         const dir = dirname(filePath)
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-        appendFileSync(filePath, line + '\n', { encoding: 'utf8' })
+        await appendFile(filePath, lines, { encoding: 'utf8' })
         this.lastResolvedLogPath = filePath
         return
       } catch (e) {
-        console.error(`[wcdbCore] writeLog failed path=${filePath}:`, e)
+        console.error(`[wcdbCore] flushPendingLogs failed path=${filePath}:`, e)
       }
     }
 
-    console.error('[wcdbCore] writeLog failed for all candidates:', uniq.join(' | '))
+    console.error('[wcdbCore] flushPendingLogs failed for all candidates:', candidates.join(' | '))
+    if (this.pendingLogLines.length > 0 && this.logFlushTimer === null) {
+      this.logFlushTimer = setTimeout(() => {
+        this.logFlushTimer = null
+        void this.flushPendingLogs()
+      }, this.logFlushDelayMs)
+    }
   }
 
   private formatSqlForLog(sql: string, maxLen = 240): string {
@@ -1545,6 +1598,172 @@ export class WcdbCore {
     this.mediaStreamSessionCacheAt = 0
   }
 
+  private clearDisplayNameCache(): void {
+    this.displayNameCache.clear()
+  }
+
+  private writeDisplayNameCache(username: string, displayName: string, now = Date.now()): void {
+    const normalizedUsername = String(username || '').trim()
+    const normalizedDisplayName = String(displayName || '').trim()
+    if (!normalizedUsername || !normalizedDisplayName) return
+    this.displayNameCache.set(normalizedUsername, {
+      displayName: normalizedDisplayName,
+      updatedAt: now
+    })
+    if (this.displayNameCache.size <= this.displayNameCacheMaxEntries) return
+    const expiresBefore = now - this.displayNameCacheTtlMs
+    for (const [key, entry] of this.displayNameCache) {
+      if (entry.updatedAt < expiresBefore) this.displayNameCache.delete(key)
+    }
+    while (this.displayNameCache.size > this.displayNameCacheMaxEntries) {
+      const oldestKey = this.displayNameCache.keys().next().value as string | undefined
+      if (!oldestKey) break
+      this.displayNameCache.delete(oldestKey)
+    }
+  }
+
+  private clearMediaStreamPageCache(): void {
+    this.mediaStreamPageCache.clear()
+    for (const entries of this.mediaStreamInflight.values()) {
+      for (const entry of entries) {
+        entry.finished = true
+        entry.resolve()
+      }
+    }
+    this.mediaStreamInflight.clear()
+  }
+
+  private pruneMediaStreamPageCache(now = Date.now()): void {
+    for (const [key, entries] of this.mediaStreamPageCache.entries()) {
+      const liveEntries = entries.filter((entry) => now - entry.updatedAt <= this.mediaStreamPageCacheTtlMs)
+      if (liveEntries.length > 0) {
+        this.mediaStreamPageCache.set(key, liveEntries)
+      } else {
+        this.mediaStreamPageCache.delete(key)
+      }
+    }
+
+    while (this.countMediaStreamPageCacheEntries() > this.mediaStreamPageCacheMaxEntries) {
+      let oldestKey = ''
+      let oldestIndex = -1
+      let oldestUpdatedAt = Number.POSITIVE_INFINITY
+      for (const [key, entries] of this.mediaStreamPageCache.entries()) {
+        for (let index = 0; index < entries.length; index += 1) {
+          const updatedAt = entries[index].updatedAt
+          if (updatedAt >= oldestUpdatedAt) continue
+          oldestUpdatedAt = updatedAt
+          oldestKey = key
+          oldestIndex = index
+        }
+      }
+      if (!oldestKey || oldestIndex < 0) break
+      const entries = this.mediaStreamPageCache.get(oldestKey) || []
+      entries.splice(oldestIndex, 1)
+      if (entries.length > 0) {
+        this.mediaStreamPageCache.set(oldestKey, entries)
+      } else {
+        this.mediaStreamPageCache.delete(oldestKey)
+      }
+    }
+  }
+
+  private countMediaStreamPageCacheEntries(): number {
+    let count = 0
+    for (const entries of this.mediaStreamPageCache.values()) {
+      count += entries.length
+    }
+    return count
+  }
+
+  private getMediaStreamPageCacheKey(options: {
+    sessionId?: string
+    mediaType?: string
+    beginTimestamp?: number
+    endTimestamp?: number
+  }): string {
+    return JSON.stringify([
+      this.currentPath || '',
+      this.currentWxid || '',
+      String(options.sessionId || '').trim(),
+      String(options.mediaType || 'all').trim(),
+      Number(options.beginTimestamp || 0) || 0,
+      Number(options.endTimestamp || 0) || 0
+    ])
+  }
+
+  private readMediaStreamPageCache(key: string, offset: number, limit: number, startedAt = Date.now()): {
+    success: true
+    items: any[]
+    hasMore: boolean
+    nextOffset: number
+    streamSource: 'pageCache'
+    pageCacheHit: true
+    nativeRows: number
+    elapsedMs: number
+  } | null {
+    const now = Date.now()
+    this.pruneMediaStreamPageCache(now)
+    const entries = this.mediaStreamPageCache.get(key) || []
+    const entry = entries.find((candidate) => {
+      if (offset < candidate.startOffset) return false
+      if (offset > candidate.endOffset) return false
+      if (offset === candidate.endOffset && candidate.hasMore) return false
+      const start = offset - candidate.startOffset
+      const available = Math.max(0, candidate.items.length - start)
+      return available >= limit || !candidate.hasMore
+    })
+    if (!entry) return null
+
+    const start = offset - entry.startOffset
+    const available = Math.max(0, entry.items.length - start)
+    if (available <= 0) {
+      if (entry.hasMore) return null
+      return {
+        success: true,
+        items: [],
+        hasMore: false,
+        nextOffset: offset,
+        streamSource: 'pageCache',
+        pageCacheHit: true,
+        nativeRows: entry.items.length,
+        elapsedMs: Date.now() - startedAt
+      }
+    }
+    if (available < limit && entry.hasMore) return null
+
+    const items = entry.items.slice(start, start + limit)
+    entry.updatedAt = now
+    const nextOffset = offset + items.length
+    return {
+      success: true,
+      items,
+      hasMore: entry.hasMore || nextOffset < entry.endOffset,
+      nextOffset,
+      streamSource: 'pageCache',
+      pageCacheHit: true,
+      nativeRows: entry.items.length,
+      elapsedMs: Date.now() - startedAt
+    }
+  }
+
+  private writeMediaStreamPageCache(key: string, offset: number, items: any[], hasMore: boolean): void {
+    const now = Date.now()
+    this.pruneMediaStreamPageCache(now)
+    const nextEntry = {
+      key,
+      startOffset: offset,
+      endOffset: offset + items.length,
+      items,
+      hasMore,
+      updatedAt: now
+    }
+    const entries = (this.mediaStreamPageCache.get(key) || [])
+      .filter((entry) => entry.startOffset !== nextEntry.startOffset || entry.endOffset !== nextEntry.endOffset)
+    entries.push(nextEntry)
+    this.mediaStreamPageCache.set(key, entries)
+    this.pruneMediaStreamPageCache(now)
+  }
+
   isReady(): boolean {
     return this.ensureReady()
   }
@@ -1621,6 +1840,8 @@ export class WcdbCore {
       this.currentWxid = wxid
       this.currentDbStoragePath = dbStoragePath
       this.initialized = true
+      this.clearDisplayNameCache()
+      this.clearMediaStreamPageCache()
       lastDllInitError = null
       if (this.wcdbSetMyWxid && wxid) {
         try {
@@ -1666,7 +1887,9 @@ export class WcdbCore {
       this.currentDbStoragePath = null
       this.initialized = false
       this.clearHardlinkCaches()
+      this.clearDisplayNameCache()
       this.clearMediaStreamSessionCache()
+      this.clearMediaStreamPageCache()
       this.stopLogPolling()
     }
   }
@@ -1740,6 +1963,7 @@ export class WcdbCore {
         return { success: false, error: message || `一键已读失败: ${result}` }
       }
       this.clearMediaStreamSessionCache()
+      this.clearMediaStreamPageCache()
       this.writeLog('markAllSessionsRead ok')
       return { success: true }
     } catch (e) {
@@ -2098,10 +2322,17 @@ export class WcdbCore {
     }>
     hasMore?: boolean
     nextOffset?: number
+    streamSource?: 'native' | 'pageCache' | 'inflight'
+    pageCacheHit?: boolean
+    inflightMerged?: boolean
+    nativeLimit?: number
+    nativeRows?: number
+    elapsedMs?: number
     error?: string
   }> {
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
     if (!this.wcdbScanMediaStream) return { success: false, error: '当前数据服务版本不支持资源扫描，请先更新 wcdb 数据服务' }
+    let finishMediaStreamInflight: (() => void) | null = null
     try {
       const toInt = (value: unknown): number => {
         const n = Number(value || 0)
@@ -2295,7 +2526,12 @@ export class WcdbCore {
         const fallback = candidates.find((item) => item.length >= 16 && item.length <= 64)
         return String(fallback || '').toLowerCase()
       }
-      const extractImageDatName = (row: Record<string, any>, content: string): string => {
+      const extractImageDatName = (
+        row: Record<string, any>,
+        content: string,
+        packedPayload?: string,
+        allowPackedFallback = true
+      ): string => {
         const direct = pickString(row, [
           'image_path',
           'imagePath',
@@ -2313,21 +2549,11 @@ export class WcdbCore {
         const normalizedXml = normalizeDatBase(xmlCandidate)
         if (normalizedXml) return normalizedXml
 
-        const packedRaw = pickRaw(row, [
-          'packed_info_data',
-          'packedInfoData',
-          'packed_info_blob',
-          'packedInfoBlob',
-          'packed_info',
-          'packedInfo',
-          'BytesExtra',
-          'bytes_extra',
-          'WCDB_CT_packed_info',
-          'reserved0',
-          'Reserved0',
-          'WCDB_CT_Reserved0'
-        ])
-        const packedText = decodePackedToPrintable(packedRaw)
+        if (!allowPackedFallback) return ''
+
+        const packedText = packedPayload === undefined
+          ? extractPackedPayload(row)
+          : packedPayload
         if (packedText) {
           const datLike = /([0-9a-fA-F]{8,})(?:\.t)?\.dat/i.exec(packedText)
           if (datLike?.[1]) return String(datLike[1]).toLowerCase()
@@ -2371,6 +2597,62 @@ export class WcdbCore {
       const endTimestamp = Math.max(0, toInt(options?.endTimestamp))
       const offset = Math.max(0, toInt(options?.offset))
       const limit = Math.min(1200, Math.max(40, toInt(options?.limit) || 240))
+      const nativeLimit = Math.min(1200, Math.max(limit, Math.min(Math.max(limit * 4, 320), 720)))
+      const pageCacheKey = this.getMediaStreamPageCacheKey({
+        sessionId: requestedSessionId,
+        mediaType,
+        beginTimestamp,
+        endTimestamp
+      })
+      const startedAt = Date.now()
+      const cachedPage = this.readMediaStreamPageCache(pageCacheKey, offset, limit, startedAt)
+      if (cachedPage) return cachedPage
+      const requestedEndOffset = offset + limit
+      const existingInflight = (this.mediaStreamInflight.get(pageCacheKey) || []).find((entry) => (
+        offset >= entry.startOffset &&
+        requestedEndOffset <= entry.endOffset
+      ))
+      if (existingInflight) {
+        await existingInflight.promise.catch(() => { })
+        const inflightPage = this.readMediaStreamPageCache(pageCacheKey, offset, limit, startedAt)
+        if (inflightPage) {
+          return {
+            ...inflightPage,
+            streamSource: 'inflight',
+            pageCacheHit: false,
+            inflightMerged: true,
+            elapsedMs: Date.now() - startedAt
+          }
+        }
+      }
+
+      let completeInflight: (() => void) | null = null
+      const inflightPromise = new Promise<void>((resolve) => {
+        completeInflight = resolve
+      })
+      const inflightEntry: MediaStreamInflightEntry = {
+        startOffset: offset,
+        endOffset: offset + nativeLimit,
+        promise: inflightPromise,
+        resolve: () => completeInflight?.(),
+        finished: false
+      }
+      const inflightEntries = this.mediaStreamInflight.get(pageCacheKey) || []
+      inflightEntries.push(inflightEntry)
+      this.mediaStreamInflight.set(pageCacheKey, inflightEntries)
+      const finishInflight = () => {
+        if (inflightEntry.finished) return
+        inflightEntry.finished = true
+        const entries = this.mediaStreamInflight.get(pageCacheKey) || []
+        const nextEntries = entries.filter((entry) => entry !== inflightEntry)
+        if (nextEntries.length > 0) {
+          this.mediaStreamInflight.set(pageCacheKey, nextEntries)
+        } else {
+          this.mediaStreamInflight.delete(pageCacheKey)
+        }
+        inflightEntry.resolve()
+      }
+      finishMediaStreamInflight = finishInflight
 
       const getSessionRows = async (): Promise<{
         success: boolean
@@ -2425,12 +2707,15 @@ export class WcdbCore {
       } else {
         const sessionsRowsRes = await getSessionRows()
         if (!sessionsRowsRes.success || !Array.isArray(sessionsRowsRes.rows)) {
+          finishInflight()
           return { success: false, error: sessionsRowsRes.error || '读取会话失败' }
         }
         sessionRows = sessionsRowsRes.rows
       }
 
       if (sessionRows.length === 0) {
+        this.writeMediaStreamPageCache(pageCacheKey, offset, [], false)
+        finishInflight()
         return { success: true, items: [], hasMore: false, nextOffset: offset }
       }
       const sessionNameMap = new Map(sessionRows.map((row) => [row.sessionId, row.displayName || row.sessionId]))
@@ -2444,16 +2729,20 @@ export class WcdbCore {
         mediaTypeCode,
         beginTimestamp,
         endTimestamp,
-        limit,
+        nativeLimit,
         offset,
         outPtr,
         outHasMore
       )
       if (result !== 0 || !outPtr[0]) {
+        finishInflight()
         return { success: false, error: `扫描资源失败: ${result}` }
       }
       const jsonStr = this.decodeJsonPtr(outPtr[0])
-      if (!jsonStr) return { success: false, error: '解析资源失败' }
+      if (!jsonStr) {
+        finishInflight()
+        return { success: false, error: '解析资源失败' }
+      }
       const rows = JSON.parse(jsonStr)
       const list = Array.isArray(rows) ? rows as Array<Record<string, any>> : []
 
@@ -2490,7 +2779,6 @@ export class WcdbCore {
           if (!rawMessageContent && !rawCompressContent) return ''
           return decodeMessageContent(rawMessageContent, rawCompressContent)
         }
-        const packedPayload = extractPackedPayload(row)
         const imageMd5ByColumn = pickString(row, ['image_md5', 'imageMd5'])
         const videoMd5ByColumn = pickString(row, ['video_md5', 'videoMd5', 'raw_md5', 'rawMd5'])
         const packedRaw = pickRaw(row, [
@@ -2507,6 +2795,11 @@ export class WcdbCore {
           'Reserved0',
           'WCDB_CT_Reserved0'
         ])
+        let packedPayload: string | undefined
+        const getPackedPayload = (): string => {
+          if (packedPayload === undefined) packedPayload = extractPackedPayload(row)
+          return packedPayload
+        }
 
         let content = ''
         let imageMd5: string | undefined
@@ -2514,24 +2807,25 @@ export class WcdbCore {
         let videoMd5: string | undefined
 
         if (localType === 3) {
-          imageMd5 = imageMd5ByColumn || extractHexMd5(packedPayload) || undefined
-          imageDatName = extractImageDatName(row, '') || undefined
+          imageMd5 = imageMd5ByColumn || undefined
+          imageDatName = extractImageDatName(row, '', undefined, false) || undefined
+          if (!imageMd5) imageMd5 = extractHexMd5(getPackedPayload()) || undefined
           if (!imageMd5 || !imageDatName) {
             content = decodeContentIfNeeded()
-            if (!imageMd5) imageMd5 = extractImageMd5(content) || extractHexMd5(packedPayload) || undefined
-            if (!imageDatName) imageDatName = extractImageDatName(row, content) || undefined
+            if (!imageMd5) imageMd5 = extractImageMd5(content) || extractHexMd5(getPackedPayload()) || undefined
+            if (!imageDatName) imageDatName = extractImageDatName(row, content, getPackedPayload()) || undefined
           }
         } else if (localType === 43) {
           videoMd5 =
             extractVideoFileNameFromPackedRaw(packedRaw) ||
             normalizeVideoFileToken(videoMd5ByColumn) ||
-            extractHexMd5(packedPayload) ||
+            extractHexMd5(getPackedPayload()) ||
             undefined
           if (!videoMd5) {
             content = decodeContentIfNeeded()
             videoMd5 =
               normalizeVideoFileToken(extractVideoMd5(content)) ||
-              extractHexMd5(packedPayload) ||
+              extractHexMd5(getPackedPayload()) ||
               undefined
           } else if (useRawMessageContent) {
             // 占位态标题只依赖简单 XML，已带 md5 时不做额外解压
@@ -2547,7 +2841,7 @@ export class WcdbCore {
           serverId: pickString(row, ['server_id', 'serverId']) || undefined,
           createTime: toInt(row.create_time ?? row.createTime),
           localType,
-          senderUsername: pickString(row, ['sender_username', 'senderUsername']) || undefined,
+          senderUsername: pickString(row, ['sender_username', 'senderUsername', 'real_sender_id', 'realSenderId']) || undefined,
           isSend: row.is_send === null || row.is_send === undefined ? null : toInt(row.is_send),
           imageMd5,
           imageDatName,
@@ -2580,13 +2874,27 @@ export class WcdbCore {
         }
       }
 
+      const nativeHasMore = Number(outHasMore[0]) > 0
+      const canAdvance = items.length > 0
+      this.writeMediaStreamPageCache(pageCacheKey, offset, items, canAdvance && nativeHasMore)
+      const pageItems = items.slice(0, limit)
+      const nextOffset = offset + pageItems.length
+      const hasMore = nextOffset > offset && (nativeHasMore || pageItems.length < items.length)
+      finishInflight()
+
       return {
         success: true,
-        items,
-        hasMore: Number(outHasMore[0]) > 0,
-        nextOffset: offset + items.length
+        items: pageItems,
+        hasMore,
+        nextOffset,
+        streamSource: 'native',
+        pageCacheHit: false,
+        nativeLimit,
+        nativeRows: items.length,
+        elapsedMs: Date.now() - startedAt
       }
     } catch (e) {
+      finishMediaStreamInflight?.()
       return { success: false, error: String(e) }
     }
   }
@@ -2597,14 +2905,35 @@ export class WcdbCore {
     }
     if (usernames.length === 0) return { success: true, map: {} }
     try {
+      const now = Date.now()
+      const resultMap: Record<string, string> = {}
+      const toFetch: string[] = []
+      const seen = new Set<string>()
+
+      for (const username of usernames) {
+        const normalizedUsername = String(username || '').trim()
+        if (!normalizedUsername || seen.has(normalizedUsername)) continue
+        seen.add(normalizedUsername)
+        const cached = this.displayNameCache.get(normalizedUsername)
+        if (cached && now - cached.updatedAt < this.displayNameCacheTtlMs) {
+          resultMap[normalizedUsername] = cached.displayName
+          continue
+        }
+        toFetch.push(normalizedUsername)
+      }
+
+      if (toFetch.length === 0) return { success: true, map: resultMap }
+
       if (process.platform === 'darwin') {
-        const uniq = Array.from(new Set(usernames.map((x) => String(x || '').trim()).filter(Boolean)))
-        if (uniq.length === 0) return { success: true, map: {} }
-        const inList = uniq.map((u) => `'${u.replace(/'/g, "''")}'`).join(',')
+        const inList = toFetch.map((u) => `'${u.replace(/'/g, "''")}'`).join(',')
         const sql = `SELECT * FROM contact WHERE username IN (${inList})`
         const q = await this.execQuery('contact', null, sql)
-        if (!q.success) return { success: false, error: q.error || '获取昵称失败' }
-        const map: Record<string, string> = {}
+        if (!q.success) {
+          if (Object.keys(resultMap).length > 0) {
+            return { success: true, map: resultMap, error: q.error || '获取昵称失败' }
+          }
+          return { success: false, error: q.error || '获取昵称失败' }
+        }
         for (const row of (q.rows || []) as Array<Record<string, any>>) {
           const username = this.pickFirstStringField(row, ['username', 'user_name', 'userName'])
           if (!username) continue
@@ -2613,31 +2942,56 @@ export class WcdbCore {
             'nick_name', 'nickName', 'nickname', 'NickName',
             'alias', 'Alias'
           ]) || username
-          map[username] = display
+          resultMap[username] = display
+          this.writeDisplayNameCache(username, display, now)
         }
         // 保证每个请求用户名至少有回退值
-        for (const u of uniq) {
-          if (!map[u]) map[u] = u
+        for (const u of toFetch) {
+          if (!resultMap[u]) {
+            resultMap[u] = u
+            this.writeDisplayNameCache(u, u, now)
+          }
         }
-        return { success: true, map }
+        return { success: true, map: resultMap }
       }
 
       // 让出控制权，避免阻塞事件循环
       await new Promise(resolve => setImmediate(resolve))
 
       const outPtr = [null as any]
-      const result = this.wcdbGetDisplayNames(this.handle, JSON.stringify(usernames), outPtr)
+      const result = this.wcdbGetDisplayNames(this.handle, JSON.stringify(toFetch), outPtr)
 
       //数据服务调用后再次让出控制权
       await new Promise(resolve => setImmediate(resolve))
 
       if (result !== 0 || !outPtr[0]) {
+        if (Object.keys(resultMap).length > 0) {
+          return { success: true, map: resultMap, error: `获取昵称失败: ${result}` }
+        }
         return { success: false, error: `获取昵称失败: ${result}` }
       }
       const jsonStr = this.decodeJsonPtr(outPtr[0])
-      if (!jsonStr) return { success: false, error: '解析昵称失败' }
+      if (!jsonStr) {
+        if (Object.keys(resultMap).length > 0) {
+          return { success: true, map: resultMap, error: '解析昵称失败' }
+        }
+        return { success: false, error: '解析昵称失败' }
+      }
       const map = JSON.parse(jsonStr)
-      return { success: true, map }
+      if (map && typeof map === 'object') {
+        for (const username of toFetch) {
+          const display = String((map as Record<string, unknown>)[username] || '').trim()
+          if (!display) continue
+          resultMap[username] = display
+          this.writeDisplayNameCache(username, display, now)
+        }
+      }
+      for (const username of toFetch) {
+        if (resultMap[username]) continue
+        resultMap[username] = username
+        this.writeDisplayNameCache(username, username, now)
+      }
+      return { success: true, map: resultMap }
     } catch (e) {
       return { success: false, error: String(e) }
     }

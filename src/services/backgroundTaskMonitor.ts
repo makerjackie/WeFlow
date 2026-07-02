@@ -203,6 +203,26 @@ export const requestCancelBackgroundTasks = (predicate: (task: BackgroundTaskRec
   return canceledCount
 }
 
+export const clearSettledBackgroundTasks = (predicate?: (task: BackgroundTaskRecord) => boolean): number => {
+  let clearedCount = 0
+  for (const task of [...tasks.values()]) {
+    if (ACTIVE_STATUSES.has(task.status)) continue
+    if (predicate && !predicate(task)) continue
+
+    tasks.delete(task.id)
+    cancelHandlers.delete(task.id)
+    pauseHandlers.delete(task.id)
+    resumeHandlers.delete(task.id)
+    clearedCount += 1
+  }
+
+  if (clearedCount > 0) {
+    notifyListeners()
+  }
+
+  return clearedCount
+}
+
 export const isBackgroundTaskCancelRequested = (taskId: string): boolean => {
   const task = tasks.get(taskId)
   return Boolean(task?.cancelRequested)

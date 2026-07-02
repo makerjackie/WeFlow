@@ -30,12 +30,15 @@ export type SessionLayout = 'shared' | 'per-session'
 
 export type DisplayNamePreference = 'group-nickname' | 'remark' | 'nickname'
 
+export type ExportConflictStrategy = 'incremental' | 'overwrite' | 'rename'
+
 export type TextExportFormat =
   | 'chatlab'
   | 'chatlab-jsonl'
   | 'json'
   | 'arkme-json'
   | 'html'
+  | 'markdown'
   | 'txt'
   | 'excel'
   | 'weclone'
@@ -67,10 +70,12 @@ export interface ExportOptions {
   maxFileSizeMb: number
   exportVoiceAsText: boolean
   exportPathStyle: 'auto' | 'posix' | 'windows'
+  exportConflictStrategy: ExportConflictStrategy
   excelCompactColumns: boolean
   txtColumns: string[]
   displayNamePreference: DisplayNamePreference
   exportConcurrency: number
+  fileNamingMode: 'classic' | 'date-range'
 }
 
 // ─── Session ─────────────────────────────────────────────────

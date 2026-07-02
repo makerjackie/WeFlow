@@ -428,6 +428,73 @@ export interface ElectronAPI {
       }
     }>
     clearExportCardLogs: () => Promise<{ success: boolean }>
+    recordResourceStats: (payload: unknown) => Promise<{ success: boolean; count?: number }>
+    getResourceStats: (options?: { limit?: number }) => Promise<{
+      entries: Array<{ ts: number; payload: Record<string, unknown> }>
+      summary: {
+        count: number
+        firstTs: number
+        lastTs: number
+        samples?: number
+        longFrames?: number
+        maxRecentFrameMs?: number
+        maxQueued?: number
+        maxQueuedCache?: number
+        maxQueuedDecrypt?: number
+        maxQueuedHigh?: number
+        maxQueuedNormal?: number
+        maxQueuedLow?: number
+        maxPending?: number
+        maxActiveCache?: number
+        maxActiveDecrypt?: number
+        maxHighWaterQueued?: number
+        maxHighWaterQueuedDecrypt?: number
+        maxHighWaterQueuedLow?: number
+        maxHighWaterActiveDecrypt?: number
+        mediaStreamLoadSamples?: number
+        mediaStreamAvgLoadMs?: number
+        mediaStreamMaxLoadMs?: number
+        mediaStreamNativeLoads?: number
+        mediaStreamPageCacheHits?: number
+        mediaStreamInflightMerges?: number
+        mediaStreamAvoidedNativeLoads?: number
+        mediaStreamAvoidedNativeRate?: number
+        mediaStreamPageCacheHitRate?: number
+        mediaStreamRowsLoaded?: number
+        mediaStreamDuplicateRows?: number
+        mediaStreamDuplicateRate?: number
+        mediaStreamNoProgressStops?: number
+        preloadAccepted?: number
+        preloadDeduped?: number
+        preloadHandled?: number
+        preloadDedupRate?: number
+        preloadCanceledActive?: number
+        preloadDroppedQueued?: number
+        preloadDeferredLowPriority?: number
+        preloadLowPriorityIdleDeferrals?: number
+        preloadActiveCacheSnapshots?: number
+        preloadActiveCacheSnapshotSkipped?: number
+        preloadActiveCacheSnapshotCanceled?: number
+        preloadLowPriorityRejected?: number
+        imagePreloadRejectedCapacity?: number
+        imagePredecryptRequests?: number
+        imagePredecryptBackpressureSkips?: number
+        imagePredecryptRejectedCapacity?: number
+        imagePredecryptDeferred?: number
+        imagePredecryptPreviewUpgrades?: number
+        imagePredecryptRejectRate?: number
+        imagePredecryptBackpressureRate?: number
+        predecryptHiddenSkips?: number
+        rangeHiddenSkips?: number
+        rangeDuplicateSkips?: number
+        rangeVisibilityReschedules?: number
+        transientStatePruneRuns?: number
+        preloadTotalsBaselineCaptured?: boolean
+        counterDeltas?: Record<string, number>
+        preloadTotalDeltas?: Record<string, number>
+      }
+    }>
+    clearResourceStats: () => Promise<{ success: boolean }>
     exportExportCardLogs: (payload: {
       filePath: string
       frontendLogs?: unknown[]
@@ -644,6 +711,8 @@ export interface ElectronAPI {
         imageMessages: number
         videoMessages: number
         emojiMessages: number
+        /** 文件类消息数量 */
+        fileMessages: number
         transferMessages: number
         redPacketMessages: number
         callMessages: number
@@ -726,6 +795,12 @@ export interface ElectronAPI {
       }>
       hasMore?: boolean
       nextOffset?: number
+      streamSource?: 'native' | 'pageCache' | 'inflight'
+      pageCacheHit?: boolean
+      inflightMerged?: boolean
+      nativeLimit?: number
+      nativeRows?: number
+      elapsedMs?: number
       error?: string
     }>
     resolveVoiceCache: (sessionId: string, msgId: string) => Promise<{ success: boolean; hasCache: boolean; data?: string }>
@@ -840,6 +915,8 @@ export interface ElectronAPI {
       hardlinkOnly?: boolean
       disableUpdateCheck?: boolean
       allowCacheIndex?: boolean
+      allowCachePromotion?: boolean
+      allowFilesystemScan?: boolean
       suppressEvents?: boolean
     }) => Promise<{ success: boolean; localPath?: string; liveVideoPath?: string; error?: string; failureKind?: 'not_found' | 'decrypt_failed' }>
     resolveCache: (payload: {
@@ -851,11 +928,13 @@ export interface ElectronAPI {
       hardlinkOnly?: boolean
       disableUpdateCheck?: boolean
       allowCacheIndex?: boolean
+      allowCachePromotion?: boolean
+      allowFilesystemScan?: boolean
       suppressEvents?: boolean
     }) => Promise<{ success: boolean; localPath?: string; hasUpdate?: boolean; liveVideoPath?: string; error?: string; failureKind?: 'not_found' | 'decrypt_failed' }>
     resolveCacheBatch: (
       payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
-      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
+      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; allowCachePromotion?: boolean; allowFilesystemScan?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => Promise<{
       success: boolean
       rows?: Array<{ success: boolean; localPath?: string; hasUpdate?: boolean; error?: string; failureKind?: 'not_found' | 'decrypt_failed' }>
@@ -863,11 +942,79 @@ export interface ElectronAPI {
     }>
     preload: (
       payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
-      options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
-    ) => Promise<boolean>
-    preloadHardlinkMd5s: (md5List: string[]) => Promise<boolean>
-    onUpdateAvailable: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => void) => () => void
-    onCacheResolved: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string; localPath: string }) => void) => () => void
+      options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean; allowFilesystemScan?: boolean; emitResolved?: boolean; scope?: string; priority?: 'high' | 'normal' | 'low' }
+    ) => Promise<{
+      success: true
+      requested: number
+      accepted: number
+      mergedQueued: number
+      skippedActive: number
+      skippedPending: number
+      ignoredCanceled: number
+      rejectedCapacity: number
+      deferred: number
+      handledIdentities: string[]
+      acceptedIdentities: string[]
+      mergedQueuedIdentities: string[]
+      skippedActiveIdentities: string[]
+      skippedPendingIdentities: string[]
+      rejectedIdentities: string[]
+      deferredIdentities: string[]
+    }>
+    cancelPreloadScope: (scope: string) => Promise<boolean>
+    getPreloadStats: () => Promise<{
+      queued: number
+      pending: number
+      activeCache: number
+      activeDecrypt: number
+      queuedIdentities: number
+      queuedCache: number
+      queuedDecrypt: number
+      queuedHigh: number
+      queuedNormal: number
+      queuedLow: number
+      activeIdentities: number
+      queuedScopes: number
+      activeScopes: number
+      canceledScopes: number
+      highWater: {
+        queued: number
+        pending: number
+        queuedCache: number
+        queuedDecrypt: number
+        queuedHigh: number
+        queuedNormal: number
+        queuedLow: number
+        activeCache: number
+        activeDecrypt: number
+        activeIdentities: number
+      }
+      totals: {
+        accepted: number
+        mergedQueued: number
+        skippedActive: number
+        ignoredCanceled: number
+        droppedQueued: number
+        canceledQueued: number
+        canceledActive: number
+        promotedActive: number
+        rejectedCapacity: number
+        deferredLowPriority: number
+        lowPriorityIdleDeferrals: number
+        skippedPending: number
+        forcedThumbnailRefreshes: number
+        forcedThumbnailRefreshFailures: number
+        lowPriorityRejected: number
+        activeCacheSnapshots: number
+        activeCacheSnapshotSkipped: number
+        activeCacheSnapshotCanceled: number
+        started: number
+        completed: number
+      }
+    }>
+    preloadHardlinkMd5s: (md5List: string[], options?: { chunkSize?: number; yieldMs?: number; filesystemFallback?: boolean }) => Promise<boolean>
+    onUpdateAvailable: (callback: (payload: { cacheKey: string; sessionId?: string; createTime?: number; imageMd5?: string; imageDatName?: string }) => void) => () => void
+    onCacheResolved: (callback: (payload: { cacheKey: string; sessionId?: string; createTime?: number; imageMd5?: string; imageDatName?: string; localPath: string }) => void) => () => void
     onDecryptProgress: (callback: (payload: {
       cacheKey: string
       imageMd5?: string
@@ -885,6 +1032,20 @@ export interface ElectronAPI {
       videoUrl?: string
       coverUrl?: string
       thumbUrl?: string
+      error?: string
+    }>
+    getVideoInfoBatch: (videoMd5List: string[], options?: { includePoster?: boolean; posterFormat?: 'dataUrl' | 'fileUrl' }) => Promise<{
+      success: boolean
+      rows?: Array<{
+        index: number
+        md5: string
+        success: boolean
+        exists: boolean
+        videoUrl?: string
+        coverUrl?: string
+        thumbUrl?: string
+        error?: string
+      }>
       error?: string
     }>
     parseVideoMd5: (content: string) => Promise<{
@@ -1529,12 +1690,13 @@ export interface ElectronAPI {
 }
 
 export interface ExportOptions {
-  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
+  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'markdown' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null
   senderUsername?: string
   fileNameSuffix?: string
   exportMedia?: boolean
+  exportConflictStrategy?: 'incremental' | 'overwrite' | 'rename'
   exportAvatars?: boolean
   exportImages?: boolean
   exportVoices?: boolean

@@ -47,6 +47,7 @@ export class VoiceTranscribeService {
   private downloadTasks = new Map<string, Promise<{ success: boolean; path?: string; error?: string }>>()
   private recognizer: OfflineRecognizer | null = null
   private isInitializing = false
+  private transcribeQueueTail: Promise<void> = Promise.resolve()
 
   private buildTranscribeWorkerEnv(): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...process.env }
@@ -228,6 +229,29 @@ export class VoiceTranscribeService {
     onPartial?: (text: string) => void,
     languages?: string[]
   ): Promise<{ success: boolean; transcript?: string; error?: string }> {
+    return this.runInTranscribeQueue(() => this.transcribeWavBufferNow(wavData, onPartial, languages))
+  }
+
+  private async runInTranscribeQueue<T>(task: () => Promise<T>): Promise<T> {
+    const previous = this.transcribeQueueTail
+    let release!: () => void
+    this.transcribeQueueTail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      release()
+    }
+  }
+
+  private async transcribeWavBufferNow(
+    wavData: Buffer,
+    onPartial?: (text: string) => void,
+    languages?: string[]
+  ): Promise<{ success: boolean; transcript?: string; error?: string }> {
     return new Promise((resolve) => {
       try {
         const modelPath = this.resolveModelPath(SENSEVOICE_MODEL.files.model)
@@ -254,47 +278,96 @@ export class VoiceTranscribeService {
           stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
           serialization: 'advanced'
         })
+
+        let settled = false
+        let shutdownRequested = false
+        let shutdownTimer: NodeJS.Timeout | null = null
+
+        const clearShutdownTimer = () => {
+          if (shutdownTimer) {
+            clearTimeout(shutdownTimer)
+            shutdownTimer = null
+          }
+        }
+
+        const requestShutdown = () => {
+          shutdownRequested = true
+          try {
+            if (worker.connected) {
+              worker.disconnect()
+            }
+          } catch { }
+
+          shutdownTimer = setTimeout(() => {
+            try {
+              if (!worker.killed) {
+                worker.kill('SIGTERM')
+              }
+            } catch { }
+          }, 1500)
+        }
+
+        const settle = (result: { success: boolean; transcript?: string; error?: string }, shutdown = true) => {
+          if (settled) return
+          settled = true
+          if (shutdown) requestShutdown()
+          resolve(result)
+        }
+
         worker.send({
           modelPath,
           tokensPath,
           wavData,
           sampleRate: 16000,
           languages: supportedLanguages
+        }, (error: Error | null | undefined) => {
+          if (error) {
+            settle({ success: false, error: `发送转写任务失败: ${String(error)}` })
+          }
         })
-
-        let finalTranscript = ''
 
         worker.on('message', (msg: any) => {
           if (msg.type === 'partial') {
             onPartial?.(msg.text)
           } else if (msg.type === 'final') {
-            finalTranscript = msg.text
-            resolve({ success: true, transcript: finalTranscript })
-            worker.disconnect()
-            worker.kill()
+            settle({ success: true, transcript: String(msg.text || '') })
           } else if (msg.type === 'error') {
             console.error('[VoiceTranscribe] Worker 错误:', msg.error)
-            resolve({ success: false, error: msg.error })
-            worker.disconnect()
-            worker.kill()
+            settle({ success: false, error: String(msg.error || '转写进程返回未知错误') })
           }
         })
 
-        worker.on('error', (err: Error) => resolve({ success: false, error: String(err) }))
-        worker.on('exit', (code: number | null, signal: string | null) => {
-          if (code === null || signal === 'SIGSEGV') {
+        worker.on('error', (err: Error) => {
+          settle({ success: false, error: String(err) })
+        })
 
+        worker.on('exit', (code: number | null, signal: string | null) => {
+          clearShutdownTimer()
+          if (settled) return
+
+          if (signal === 'SIGSEGV') {
             console.error(`[VoiceTranscribe] Worker 异常崩溃，信号: ${signal}。可能是由于底层 C++ 运行库在当前系统上发生段错误。`);
-            resolve({
+            settle({
               success: false,
               error: 'SEGFAULT_ERROR'
-            });
-            return;
+            }, false)
+            return
+          }
+
+          if (signal) {
+            const error = shutdownRequested
+              ? '转写进程已结束'
+              : `转写进程被系统终止: ${signal}`
+            settle({ success: false, error }, false)
+            return
           }
 
           if (code !== 0) {
-            resolve({ success: false, error: `Worker exited with code ${code}` });
+            settle({ success: false, error: `Worker exited with code ${code}` }, false)
+            return
           }
+
+          settle({ success: false, error: '转写进程未返回结果' }, false)
         })
 
       } catch (error) {

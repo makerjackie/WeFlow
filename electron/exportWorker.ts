@@ -247,6 +247,24 @@ const mapWeliveEventToProgress = (event: WeliveExportEvent): any | null => {
   }
 }
 
+const collectWeliveErrorText = (result: any): string => {
+  const parts = [
+    result?.error,
+    result?.stderr,
+    ...Object.values(result?.failedSessionErrors || {})
+  ]
+  return parts
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
+const isWeliveNativeCrashResult = (result: any): boolean => {
+  if (!result || result.success) return false
+  const text = collectWeliveErrorText(result)
+  return /3221225477|0x?c0000005|-1073741819/i.test(text)
+}
+
 async function runWeliveEngine() {
   const path = require('path') as typeof import('path')
   const fs = require('fs') as typeof import('fs')
@@ -255,7 +273,7 @@ async function runWeliveEngine() {
   const { wcdbService } = await import('./services/wcdbService')
   const {
     buildSessionExportBaseName,
-    normalizeFileNamingMode,
+    normalizeExportConflictStrategy,
     reserveUniqueOutputPath
   } = await import('./services/export/utils/fileNaming')
   const sessionIds = config.mode === 'single'
@@ -284,8 +302,7 @@ async function runWeliveEngine() {
     ? { ...normalizedOptions, exportVoiceAsText: false }
     : normalizedOptions
   await exportService.context.ensureConnected().catch(() => null)
-  const exportMediaEnabled = effectiveOptions.exportMedia === true &&
-    Boolean(effectiveOptions.exportImages || effectiveOptions.exportVoices || effectiveOptions.exportVideos || effectiveOptions.exportEmojis || effectiveOptions.exportFiles)
+  const exportMediaEnabled = exportService.context.isMediaExportEnabled(effectiveOptions)
   const writeLayout = exportService.context.resolveExportWriteLayout(effectiveOptions)
   const exportBaseDir = writeLayout === 'A'
     ? path.join(outputDir, 'texts')
@@ -300,8 +317,10 @@ async function runWeliveEngine() {
     if (format === 'chatlab-jsonl') return '.jsonl'
     if (format === 'excel') return '.xlsx'
     if (format === 'txt') return '.txt'
+    if (format === 'markdown') return '.md'
     if (format === 'weclone') return '.csv'
     if (format === 'html') return '.html'
+    if (format === 'sql') return '.sql'
     return '.json'
   }
   const resolveFinalOutputPath = async (sessionId: string) => {
@@ -317,13 +336,20 @@ async function runWeliveEngine() {
     const sessionDirName = sessionNameWithTypePrefix ? `${sessionTypePrefix}${safeName}` : safeName
     const sessionDir = useSessionFolder ? path.join(exportBaseDir, sessionDirName) : exportBaseDir
     const preferredOutputPath = path.join(sessionDir, `${fileNameWithPrefix}${getFormatExtension(String(effectiveOptions.format || 'json'))}`)
-    return normalizeFileNamingMode(effectiveOptions.fileNamingMode) === 'date-range'
+    return normalizeExportConflictStrategy(effectiveOptions.exportConflictStrategy) === 'rename'
       ? reserveUniqueOutputPath(preferredOutputPath, reservedOutputPaths)
       : preferredOutputPath
   }
 
   const finalOutputPaths: Record<string, string> = {}
   const mediaDirs: Record<string, string | undefined> = {}
+  const mediaTypes = [
+    effectiveOptions.exportImages ? 'image' : '',
+    effectiveOptions.exportVoices ? 'voice' : '',
+    effectiveOptions.exportVideos ? 'video' : '',
+    effectiveOptions.exportEmojis ? 'emoji' : '',
+    effectiveOptions.exportFiles ? 'file' : ''
+  ].filter(Boolean) as Array<'image' | 'voice' | 'video' | 'emoji' | 'file'>
   for (const sessionId of sessionIds) {
     const finalOutputPath = await resolveFinalOutputPath(sessionId)
     finalOutputPaths[sessionId] = finalOutputPath
@@ -357,6 +383,7 @@ async function runWeliveEngine() {
         outputDir,
         exportsDir: rawExportsDir,
         mediaDir: mediaDirs[sessionId],
+        mediaTypes,
         emojiCacheDir: resolveEmojiCacheDir(),
         format: 'raw-jsonl',
         parseContent: true,
@@ -433,11 +460,17 @@ async function runWeliveEngine() {
       if (format === 'txt') {
         return await exportService.orchestrator.exportSessionToTxt(sessionId, outputPath, options, queueProgress, taskControl)
       }
+      if (format === 'markdown') {
+        return await exportService.orchestrator.exportSessionToMarkdown(sessionId, outputPath, options, queueProgress, taskControl)
+      }
       if (format === 'weclone') {
         return await exportService.orchestrator.exportSessionToWeCloneCsv(sessionId, outputPath, options, queueProgress, taskControl)
       }
       if (format === 'html') {
         return await exportService.orchestrator.exportSessionToHtml(sessionId, outputPath, options, queueProgress, taskControl)
+      }
+      if (format === 'sql') {
+        return await exportService.orchestrator.exportSessionToSql(sessionId, outputPath, options, queueProgress, taskControl)
       }
       return await exportService.orchestrator.exportSessionToChatLab(sessionId, outputPath, options, queueProgress, taskControl)
     }
@@ -455,18 +488,7 @@ async function runWeliveEngine() {
   }
 }
 
-async function run() {
-  if (shouldUseWeliveEngine()) {
-    const result = await runWeliveEngine()
-    flushProgress()
-    flushCreatedPaths()
-    parentPort?.postMessage({
-      type: 'export:result',
-      data: result
-    })
-    return
-  }
-
+async function runLegacyEngine() {
   const [{ wcdbService }, { exportService }] = await Promise.all([
     import('./services/wcdbService'),
     import('./services/export')
@@ -515,13 +537,27 @@ async function run() {
       config.options || {}
     )
   } else if (config.mode === 'single') {
-    result = await exportService.exportSessionToChatLab(
-      String(config.sessionId || '').trim(),
-      String(config.outputPath || '').trim(),
-      config.options || { format: 'chatlab' },
-      onProgress,
-      taskControl
-    )
+    const sessionId = String(config.sessionId || '').trim()
+    const outputPath = String(config.outputPath || '').trim()
+    const options = config.options || { format: 'chatlab' }
+    const format = String(options.format || 'chatlab')
+    if (format === 'json' || format === 'arkme-json') {
+      result = await exportService.orchestrator.exportSessionToDetailedJson(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'excel') {
+      result = await exportService.orchestrator.exportSessionToExcel(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'txt') {
+      result = await exportService.orchestrator.exportSessionToTxt(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'markdown') {
+      result = await exportService.orchestrator.exportSessionToMarkdown(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'weclone') {
+      result = await exportService.orchestrator.exportSessionToWeCloneCsv(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'html') {
+      result = await exportService.orchestrator.exportSessionToHtml(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'sql') {
+      result = await exportService.orchestrator.exportSessionToSql(sessionId, outputPath, options, onProgress, taskControl)
+    } else {
+      result = await exportService.orchestrator.exportSessionToChatLab(sessionId, outputPath, options, onProgress, taskControl)
+    }
   } else {
     result = await exportService.exportSessions(
       Array.isArray(config.sessionIds) ? config.sessionIds : [],
@@ -539,6 +575,32 @@ async function run() {
     type: 'export:result',
     data: result
   })
+}
+
+async function run() {
+  if (shouldUseWeliveEngine()) {
+    const result = await runWeliveEngine()
+    if (!isWeliveNativeCrashResult(result)) {
+      flushProgress()
+      flushCreatedPaths()
+      parentPort?.postMessage({
+        type: 'export:result',
+        data: result
+      })
+      return
+    }
+
+    queueProgress({
+      current: 0,
+      total: Array.isArray(config.sessionIds) ? config.sessionIds.length : 1,
+      phase: 'preparing',
+      phaseLabel: 'WeLive 导出引擎异常退出，正在切换兼容导出引擎'
+    })
+    flushProgress()
+    flushCreatedPaths()
+  }
+
+  await runLegacyEngine()
 }
 
 run().catch((error) => {

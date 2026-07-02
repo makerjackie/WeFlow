@@ -11,6 +11,7 @@ import { createEmptyProgress } from '../constants'
 import { useExportTaskStore } from '../../../stores/exportTaskStore'
 import { buildProgressPayloadSignature } from '../utils/progress'
 import { resolvePerfStageByPhase, applyProgressToTaskPerformance } from '../utils/performance'
+import { emitExportSessionStatus, onExportSessionStatusRequest } from '../../../services/exportBridge'
 import type { ExportProgress } from '../types'
 
 export interface ExportTasksResult {
@@ -32,19 +33,32 @@ export function useExportTasks(): ExportTasksResult {
 
   const { setSessionStatus } = useExportTaskStore()
 
-  // Track the ongoing tasks to update the global zustand store badge
-  useEffect(() => {
+  const publishSessionStatus = useCallback(() => {
     const activeTasks = tasksRef.current.filter(t => t.status === 'running' || t.status === 'cancel_requested')
     const inProgressSessionIds = new Set<string>()
     activeTasks.forEach(task => {
       task.payload.sessionIds.forEach(id => inProgressSessionIds.add(id))
     })
 
-    setSessionStatus({
+    const payload = {
       activeTaskCount: activeTasks.length,
       inProgressSessionIds: Array.from(inProgressSessionIds)
-    })
-  }, [tasks, setSessionStatus])
+    }
+
+    setSessionStatus(payload)
+    emitExportSessionStatus(payload)
+  }, [setSessionStatus])
+
+  // Track the ongoing tasks to update the global zustand store badge
+  useEffect(() => {
+    publishSessionStatus()
+  }, [tasks, publishSessionStatus])
+
+  useEffect(() => {
+    const unsubscribe = onExportSessionStatusRequest(publishSessionStatus)
+    publishSessionStatus()
+    return unsubscribe
+  }, [publishSessionStatus])
 
   const updateTask = useCallback((taskId: string, updater: (prev: ExportTask) => ExportTask) => {
     setTasks(prev => prev.map(t => t.id === taskId ? updater(t) : t))

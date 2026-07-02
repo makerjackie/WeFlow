@@ -18,7 +18,7 @@ import { EXPORT_HTML_STYLES } from '../../exportHtmlStyles'
 import { LRUCache } from '../../../utils/LRUCache.js'
 import { normalizeTimestampSeconds, formatTimestamp, formatIsoTimestamp, parseCompactDateTimeDigitsToSeconds, parseDateTimeTextToSeconds, normalizeExportDateRange, normalizeRowTimestampSeconds, getTimestampSecondsFromRow } from '../../export/utils/timestamp';
 import { escapeHtml, escapeAttribute, renderMultilineText, decodeHtmlEntities } from '../../export/utils/htmlEscape';
-import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeFileNamingMode, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath } from '../../export/utils/fileNaming';
+import { sanitizeExportFileNamePart, resolveFileAttachmentExtensionDir, normalizeExportConflictStrategy, formatDateTokenBySeconds, buildDateRangeFileNamePart, buildSessionExportBaseName, reserveUniqueOutputPath } from '../../export/utils/fileNaming';
 import { extractXmlValue, extractXmlAttribute, extractAppMessageType, normalizeAppMessageContent } from '../../export/parsers/xmlExtractor';
 import { decodeMessageContent, decodeMaybeCompressed, decodeBinaryContent, looksLikeHex, looksLikeBase64 } from '../../export/parsers/contentDecoder';
 import { parseVoipMessage } from '../../export/parsers/voipParser';
@@ -37,6 +37,8 @@ import { ChatLabFormatter } from '../formatters/ChatLabFormatter';
 import { ExcelFormatter } from '../formatters/ExcelFormatter';
 import { HtmlFormatter } from '../formatters/HtmlFormatter';
 import { JsonFormatter } from '../formatters/JsonFormatter';
+import { MarkdownFormatter } from '../formatters/MarkdownFormatter';
+import { SqlFormatter } from '../formatters/SqlFormatter';
 import { TxtFormatter } from '../formatters/TxtFormatter';
 import { WeCloneFormatter } from '../formatters/WeCloneFormatter';
 
@@ -93,6 +95,22 @@ export class ExportOrchestrator {
     }
 
     /**
+     * 导出单个会话为 Markdown 格式
+     */
+    async exportSessionToMarkdown(sessionId: string, outputPath: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{ success: boolean; error?: string }> {
+        const formatter = new MarkdownFormatter(this.context);
+        return formatter.export(sessionId, outputPath, options, onProgress, control);
+    }
+
+    /**
+     * 导出单个会话为 PostgreSQL SQL 脚本
+     */
+    async exportSessionToSql(sessionId: string, outputPath: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{ success: boolean; error?: string }> {
+        const formatter = new SqlFormatter(this.context);
+        return formatter.export(sessionId, outputPath, options, onProgress, control);
+    }
+
+    /**
      * 批量导出多个会话
      */
     async exportSessions(sessionIds: string[], outputDir: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{
@@ -133,9 +151,9 @@ export class ExportOrchestrator {
           const effectiveOptions: ExportOptions = this.context.isMediaContentBatchExport(normalizedOptions)
             ? { ...normalizedOptions, exportVoiceAsText: false }
             : normalizedOptions
+          const conflictStrategy = normalizeExportConflictStrategy(effectiveOptions.exportConflictStrategy)
 
-          const exportMediaEnabled = effectiveOptions.exportMedia === true &&
-            Boolean(effectiveOptions.exportImages || effectiveOptions.exportVoices || effectiveOptions.exportVideos || effectiveOptions.exportEmojis || effectiveOptions.exportFiles)
+          const exportMediaEnabled = this.context.isMediaExportEnabled(effectiveOptions)
           attachMediaTelemetry = exportMediaEnabled
           if (exportMediaEnabled) {
             this.context.triggerMediaFileCacheCleanup()
@@ -193,7 +211,7 @@ export class ExportOrchestrator {
             this.context.isUnboundedDateRange(effectiveOptions.dateRange) &&
             !String(effectiveOptions.senderUsername || '').trim()
           const canFastSkipEmptySessions = false
-          const canTrySkipUnchangedTextSessions = canUseSessionSnapshotHints
+          const canTrySkipUnchangedTextSessions = canUseSessionSnapshotHints && conflictStrategy === 'incremental'
           const precheckSessionIds = canFastSkipEmptySessions
             ? sessionIds.filter((sessionId) => !sessionMessageCountHints.has(sessionId))
             : []
@@ -349,7 +367,6 @@ export class ExportOrchestrator {
                 phaseLabel: '准备导出'
               })
 
-              const fileNamingMode = normalizeFileNamingMode(effectiveOptions.fileNamingMode)
               const safeName = buildSessionExportBaseName(sessionId, sessionInfo.displayName, effectiveOptions)
               const sessionNameWithTypePrefix = effectiveOptions.sessionNameWithTypePrefix !== false
               const sessionTypePrefix = sessionNameWithTypePrefix ? await this.context.getSessionFilePrefix(sessionId) : ''
@@ -366,8 +383,10 @@ export class ExportOrchestrator {
               if (effectiveOptions.format === 'chatlab-jsonl') ext = '.jsonl'
               else if (effectiveOptions.format === 'excel') ext = '.xlsx'
               else if (effectiveOptions.format === 'txt') ext = '.txt'
+              else if (effectiveOptions.format === 'markdown') ext = '.md'
               else if (effectiveOptions.format === 'weclone') ext = '.csv'
               else if (effectiveOptions.format === 'html') ext = '.html'
+              else if (effectiveOptions.format === 'sql') ext = '.sql'
               const preferredOutputPath = path.join(sessionDir, `${fileNameWithPrefix}${ext}`)
               const canTrySkipUnchanged = canTrySkipUnchangedTextSessions &&
                 typeof messageCountHint === 'number' &&
@@ -402,7 +421,7 @@ export class ExportOrchestrator {
                 }
               }
 
-              const outputPath = fileNamingMode === 'date-range'
+              const outputPath = conflictStrategy === 'rename'
                 ? await reserveUniqueOutputPath(preferredOutputPath, reservedOutputPaths)
                 : preferredOutputPath
 
@@ -415,10 +434,14 @@ export class ExportOrchestrator {
                 result = await this.exportSessionToExcel(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else if (effectiveOptions.format === 'txt') {
                 result = await this.exportSessionToTxt(sessionId, outputPath, effectiveOptions, sessionProgress, control)
+              } else if (effectiveOptions.format === 'markdown') {
+                result = await this.exportSessionToMarkdown(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else if (effectiveOptions.format === 'weclone') {
                 result = await this.exportSessionToWeCloneCsv(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else if (effectiveOptions.format === 'html') {
                 result = await this.exportSessionToHtml(sessionId, outputPath, effectiveOptions, sessionProgress, control)
+              } else if (effectiveOptions.format === 'sql') {
+                result = await this.exportSessionToSql(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else {
                 result = { success: false, error: `不支持的格式: ${effectiveOptions.format}` }
               }

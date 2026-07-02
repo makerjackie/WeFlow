@@ -175,7 +175,8 @@ export const createDefaultExportOptions = (): import('./types').ExportOptions =>
   excelCompactColumns: true,
   txtColumns: defaultTxtColumns,
   displayNamePreference: 'remark',
-  exportConcurrency: 2
+  exportConcurrency: 2,
+  fileNamingMode: 'classic'
 })
 
 // ─── Empty progress factory ──────────────────────────────────

@@ -75,6 +75,7 @@ export interface ExportOptions {
   txtColumns: string[]
   displayNamePreference: DisplayNamePreference
   exportConcurrency: number
+  fileNamingMode: 'classic' | 'date-range'
 }
 
 // ─── Session ─────────────────────────────────────────────────

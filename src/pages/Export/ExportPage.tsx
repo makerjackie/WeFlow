@@ -26,7 +26,7 @@ import { useAutomationRunner, useAutomationStore } from './hooks/useAutomation'
 import { AutomationModal } from './components/Automation/AutomationModal'
 import { AutomationTaskForm } from './components/Automation/AutomationTaskForm'
 
-import type { SessionRow } from './types'
+import type { SessionRow, TextExportFormat } from './types'
 import { getSelectionScopeFromRows, resolveScopeDisplayNames } from './utils/session'
 import {
   emitSingleExportDialogStatus,
@@ -144,8 +144,9 @@ function ExportPage() {
 
   const handleExportDefaultsChanged = useCallback((patch: ExportDefaultsSettingsPatch) => {
     updateOptions({
-      ...(patch.format ? { defaultFormat: patch.format as any } : {}),
+      ...(patch.format ? { format: patch.format as TextExportFormat } : {}),
       ...(patch.avatars !== undefined ? { exportAvatars: patch.avatars } : {}),
+      ...(patch.fileNamingMode !== undefined ? { fileNamingMode: patch.fileNamingMode } : {}),
     })
   }, [updateOptions])
 

@@ -55,7 +55,7 @@
     "electron": "^41.1.1",
     "electron-builder": "^26.8.1",
     "esbuild": "^0.28.1",
-    "sass": "^1.98.0",
+    "sass": "^1.101.0",
     "sharp": "^0.35.3",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",

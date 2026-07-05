@@ -9,20 +9,38 @@ import './Automation.scss'
 
 interface AutomationModalProps {
   onClose: () => void
+  onRunNow: (task: ExportAutomationTask) => Promise<{ queued: boolean; reason?: string }>
 }
 
-export const AutomationModal: React.FC<AutomationModalProps> = ({ onClose }) => {
+export const AutomationModal: React.FC<AutomationModalProps> = ({ onClose, onRunNow }) => {
   const { tasks, updateTask, deleteTask } = useAutomationStore()
   const [editingTask, setEditingTask] = useState<ExportAutomationTask | null>(null)
+  const [triggeringTaskIds, setTriggeringTaskIds] = useState<Set<string>>(new Set())
 
   const handleToggleEnable = (task: ExportAutomationTask, enabled: boolean) => {
     void updateTask(task.id, prev => ({ ...prev, enabled, updatedAt: Date.now() }))
   }
 
-  const handleRunNow = (_task: ExportAutomationTask) => {
-    // Manual trigger is handled by the automation runner's evaluateSchedules
-    // For now, just show a hint
-    alert('手动触发功能需要自动化运行器的支持，任务将在下次调度周期中执行。')
+  const handleRunNow = async (task: ExportAutomationTask) => {
+    if (triggeringTaskIds.has(task.id)) return
+    setTriggeringTaskIds(prev => new Set(prev).add(task.id))
+
+    try {
+      const result = await onRunNow(task)
+      if (result.queued) {
+        alert('已手动触发自动化导出，任务已加入导出队列。')
+      } else {
+        alert(result.reason || '手动触发失败')
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '手动触发失败')
+    } finally {
+      setTriggeringTaskIds(prev => {
+        const next = new Set(prev)
+        next.delete(task.id)
+        return next
+      })
+    }
   }
 
   const handleDelete = (task: ExportAutomationTask) => {

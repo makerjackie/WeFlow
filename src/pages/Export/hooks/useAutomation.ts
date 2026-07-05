@@ -5,6 +5,7 @@ import type { ExportAutomationTask } from '../../../types/exportAutomation'
 import type { ExportTaskPayload } from '../types'
 import {
   resolveAutomationDueScheduleKey,
+  resolveAutomationDateRangeSelection,
 } from '../utils/automation'
 
 // ─── Core Logic Helpers ─────────────────────────────────────
@@ -45,6 +46,30 @@ const resolveAutomationHasNewMessages = async (task: ExportAutomationTask): Prom
     return { shouldRun: true }
   } else {
     return { shouldRun: false, reason: '无新消息，本次触发已跳过' }
+  }
+}
+
+const buildAutomationExportOptions = (task: ExportAutomationTask): any => {
+  const dateRangeSelection = resolveAutomationDateRangeSelection(task.template.dateRangeConfig)
+  return {
+    ...task.template.optionTemplate,
+    exportPathStyle: task.template.optionTemplate?.exportPathStyle || 'auto',
+    useAllTime: dateRangeSelection.useAllTime,
+    dateRange: dateRangeSelection.useAllTime ? null : dateRangeSelection.dateRange
+  }
+}
+
+const resolveAutomationOutputDir = async (task: ExportAutomationTask): Promise<string> => {
+  const taskOutputDir = String(task.outputDir || '').trim()
+  if (taskOutputDir) return taskOutputDir
+
+  const configuredOutputDir = String(await configService.getExportPath() || '').trim()
+  if (configuredOutputDir) return configuredOutputDir
+
+  try {
+    return String(await window.electronAPI.app.getDownloadsPath() || '').trim()
+  } catch {
+    return ''
   }
 }
 
@@ -201,30 +226,13 @@ export function useAutomationRunner(startTask: (payload: ExportTaskPayload) => v
         }
 
         // Enqueue
-        const outputDir = String(task.outputDir || '').trim() || await configService.getExportPath()
+        const outputDir = await resolveAutomationOutputDir(task)
         if (!outputDir) {
           markSkipped(task.id, '导出目录未设置', scheduleKey)
           continue
         }
 
-        const exportOptions: any = {
-          ...task.template.optionTemplate,
-          exportPathStyle: task.template.optionTemplate?.exportPathStyle || 'auto',
-          dateRange: typeof task.template.dateRangeConfig === 'string' 
-            ? JSON.parse(task.template.dateRangeConfig) 
-            : task.template.dateRangeConfig
-        }
-
-        startTaskRef.current({
-          sessionIds: task.sessionIds,
-          sessionNames: task.sessionNames,
-          outputDir,
-          options: exportOptions,
-          scope: task.template.scope,
-          source: 'automation',
-          automationTaskId: task.id,
-          contentType: task.template.contentType
-        })
+        const exportOptions = buildAutomationExportOptions(task)
 
         patchTask(task.id, (prev) => ({
           ...prev,
@@ -238,6 +246,17 @@ export function useAutomationRunner(startTask: (payload: ExportTaskPayload) => v
             lastScheduleKey: scheduleKey
           }
         }))
+
+        startTaskRef.current({
+          sessionIds: task.sessionIds,
+          sessionNames: task.sessionNames,
+          outputDir,
+          options: exportOptions,
+          scope: task.template.scope,
+          source: 'automation',
+          automationTaskId: task.id,
+          contentType: task.template.contentType
+        })
       }
     } catch (error) {
       console.error('Automation Schedule Evaluation Failed', error)
@@ -272,31 +291,14 @@ export function useAutomationRunner(startTask: (payload: ExportTaskPayload) => v
     task: ExportAutomationTask,
     _options?: { scheduleKey?: string }
   ): Promise<{ queued: boolean; reason?: string }> => {
-    const outputDir = String(task.outputDir || '').trim() || await configService.getExportPath()
+    const outputDir = await resolveAutomationOutputDir(task)
     if (!outputDir) {
       return { queued: false, reason: '导出目录未设置' }
     }
 
-    const exportOptions: any = {
-      ...task.template.optionTemplate,
-      exportPathStyle: task.template.optionTemplate?.exportPathStyle || 'auto',
-      dateRange: typeof task.template.dateRangeConfig === 'string' 
-        ? JSON.parse(task.template.dateRangeConfig) 
-        : task.template.dateRangeConfig
-    }
+    const exportOptions = buildAutomationExportOptions(task)
 
-    startTaskRef.current({
-      sessionIds: task.sessionIds,
-      sessionNames: task.sessionNames,
-      outputDir,
-      options: exportOptions,
-      scope: task.template.scope,
-      source: 'automation',
-      automationTaskId: task.id,
-      contentType: task.template.contentType
-    })
-
-    void updateTask(task.id, (prev) => ({
+    await updateTask(task.id, (prev) => ({
       ...prev,
       updatedAt: Date.now(),
       runState: {
@@ -308,6 +310,17 @@ export function useAutomationRunner(startTask: (payload: ExportTaskPayload) => v
         lastScheduleKey: _options?.scheduleKey || prev.runState?.lastScheduleKey
       }
     }))
+
+    startTaskRef.current({
+      sessionIds: task.sessionIds,
+      sessionNames: task.sessionNames,
+      outputDir,
+      options: exportOptions,
+      scope: task.template.scope,
+      source: 'automation',
+      automationTaskId: task.id,
+      contentType: task.template.contentType
+    })
 
     return { queued: true }
   }, [updateTask])

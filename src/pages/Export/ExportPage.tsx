@@ -374,7 +374,10 @@ function ExportPage() {
       )}
 
       {isAutomationModalOpen && (
-        <AutomationModal onClose={() => setIsAutomationModalOpen(false)} />
+        <AutomationModal
+          onClose={() => setIsAutomationModalOpen(false)}
+          onRunNow={enqueueAutomationTask}
+        />
       )}
 
       {draftAutomationPayload && (

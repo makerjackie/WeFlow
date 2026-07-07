@@ -59,6 +59,8 @@ export class WcdbCore {
   private wcdbInitProtection: any = null
   private wcdbInit: any = null
   private wcdbShutdown: any = null
+  private wcdbPurgeMemory: any = null
+  private purgeTimer: ReturnType<typeof setInterval> | null = null
   private wcdbOpenAccount: any = null
   private wcdbCloseAccount: any = null
   private wcdbSetMyWxid: any = null
@@ -680,6 +682,21 @@ export class WcdbCore {
     return ''
   }
 
+  private pickFirstDisplayNameField(row: Record<string, any>, candidates: string[]): string {
+    for (const key of candidates) {
+      const value = row[key]
+      if (typeof value === 'string') {
+        if (value.length > 0) return value.trim() || value
+        continue
+      }
+      if (value !== null && value !== undefined) {
+        const converted = String(value)
+        if (converted.length > 0) return converted.trim() || converted
+      }
+    }
+    return ''
+  }
+
   private escapeSqlString(value: string): string {
     return String(value || '').replace(/'/g, "''")
   }
@@ -691,14 +708,16 @@ export class WcdbCore {
     return `SELECT * FROM contact WHERE username IN (${inList})`
   }
 
-  private deriveContactTypeCounts(rows: Array<Record<string, any>>): { private: number; group: number; official: number; former_friend: number } {
+  private deriveContactTypeCounts(rows: Array<Record<string, any>>): { private: number; group: number; official: number; former_friend: number; blocked: number } {
     const counts = {
       private: 0,
       group: 0,
       official: 0,
-      former_friend: 0
+      former_friend: 0,
+      blocked: 0
     }
     const excludeNames = new Set(['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage'])
+    const builtinOfficialHelpers = new Set(['gh_f0a92aa7146c'])
 
     for (const row of rows || []) {
       const username = this.pickFirstStringField(row, ['username', 'user_name', 'userName'])
@@ -706,16 +725,26 @@ export class WcdbCore {
 
       const localTypeRaw = row.local_type ?? row.localType ?? row.WCDB_CT_local_type ?? 0
       const localType = Number.isFinite(Number(localTypeRaw)) ? Math.floor(Number(localTypeRaw)) : 0
+      const flagRaw = row.flag ?? row.contact_flag ?? row.contactFlag ?? row.WCDB_CT_flag ?? 0
+      const flag = Number.isFinite(Number(flagRaw)) ? Math.floor(Number(flagRaw)) : 0
       const quanPin = this.pickFirstStringField(row, ['quan_pin', 'quanPin', 'WCDB_CT_quan_pin'])
+      const alias = this.pickFirstStringField(row, ['alias', 'WCDB_CT_alias'])
+      const remark = this.pickFirstStringField(row, ['remark', 'WCDB_CT_remark'])
+      const isFormerFriendResidual = !username.startsWith('gh_') && (
+        (localType === 0 && quanPin) ||
+        (localType === 3 && flag !== 4 && (quanPin || alias || remark))
+      )
 
       if (username.endsWith('@chatroom')) {
         counts.group += 1
-      } else if (username.startsWith('gh_')) {
+      } else if (username.startsWith('gh_') && localType === 1 && !builtinOfficialHelpers.has(username)) {
         counts.official += 1
-      } else if (localType === 1 && !excludeNames.has(username)) {
-        counts.private += 1
-      } else if (localType === 0 && quanPin) {
+      } else if (!username.startsWith('gh_') && (flag & 8) === 8) {
+        counts.blocked += 1
+      } else if (isFormerFriendResidual) {
         counts.former_friend += 1
+      } else if (localType === 1 && (flag & 8) === 0 && !excludeNames.has(username)) {
+        counts.private += 1
       }
     }
 
@@ -841,6 +870,13 @@ export class WcdbCore {
 
       // wcdb_status wcdb_shutdown()
       this.wcdbShutdown = this.lib.func('int32 wcdb_shutdown()')
+
+      // wcdb_status wcdb_purge_memory()（旧版 DLL 无此导出，容错处理）
+      try {
+        this.wcdbPurgeMemory = this.lib.func('int32 wcdb_purge_memory()')
+      } catch {
+        this.wcdbPurgeMemory = null
+      }
 
       // wcdb_status wcdb_open_account(const char* session_db_path, const char* hex_key, wcdb_handle* out_handle)
       // wcdb_handle 是 int64_t
@@ -1604,7 +1640,8 @@ export class WcdbCore {
 
   private writeDisplayNameCache(username: string, displayName: string, now = Date.now()): void {
     const normalizedUsername = String(username || '').trim()
-    const normalizedDisplayName = String(displayName || '').trim()
+    const rawDisplayName = typeof displayName === 'string' ? displayName : String(displayName || '')
+    const normalizedDisplayName = rawDisplayName.trim() || rawDisplayName
     if (!normalizedUsername || !normalizedDisplayName) return
     this.displayNameCache.set(normalizedUsername, {
       displayName: normalizedDisplayName,
@@ -1853,6 +1890,7 @@ export class WcdbCore {
       if (this.isLogEnabled()) {
         this.startLogPolling()
       }
+      this.startPeriodicPurge()
       this.writeLog(`open ok handle=${handle}`, true)
       await this.dumpDbStatus('open')
       await this.runPostOpenDiagnostics(accountDir, dbStoragePath, sessionDbPath, wxid)
@@ -1869,11 +1907,36 @@ export class WcdbCore {
    * 关闭数据库
    * 注意：wcdb_close_account 可能导致崩溃，使用 shutdown 代替
    */
+  /**
+   * 周期性回收 WCDB 空闲连接与页缓存：批量查询（会话统计/分析）会让多库多连接
+   * 的页缓存驻留，purgeAll 只关闭空闲连接，热连接不受影响，代价可忽略
+   */
+  private startPeriodicPurge(): void {
+    if (this.purgeTimer || !this.wcdbPurgeMemory) return
+    this.purgeTimer = setInterval(() => {
+      if (!this.initialized) return
+      try {
+        this.wcdbPurgeMemory()
+      } catch {
+        // 忽略：purge 失败不影响功能
+      }
+    }, 60 * 1000)
+    this.purgeTimer.unref?.()
+  }
+
+  private stopPeriodicPurge(): void {
+    if (this.purgeTimer) {
+      clearInterval(this.purgeTimer)
+      this.purgeTimer = null
+    }
+  }
+
   close(): void {
     if (this.handle !== null || this.initialized) {
       // 先停止监控与云控回调，避免 shutdown 后仍有 native 回调访问已释放资源。
       try { this.stopMonitor() } catch {}
       try { this.cloudStop() } catch {}
+      this.stopPeriodicPurge()
       try {
         // 不调用 closeAccount，直接 shutdown
         this.wcdbShutdown()
@@ -2684,7 +2747,7 @@ export class WcdbCore {
               row.talker ||
               ''
             ).trim(),
-            displayName: String(row.displayName || row.display_name || row.remark || '').trim(),
+            displayName: this.pickFirstDisplayNameField(row, ['displayName', 'display_name', 'remark']),
             sortTimestamp: toInt(
               row.sort_timestamp ||
               row.sortTimestamp ||
@@ -2864,7 +2927,10 @@ export class WcdbCore {
         const displayNameRes = await this.getDisplayNames(unresolvedSessionIds)
         if (displayNameRes.success && displayNameRes.map) {
           unresolvedSessionIds.forEach((sessionId) => {
-            const display = String(displayNameRes.map?.[sessionId] || '').trim()
+            const rawDisplay = displayNameRes.map?.[sessionId]
+            const display = typeof rawDisplay === 'string'
+              ? (rawDisplay.trim() || rawDisplay)
+              : ''
             if (display) sessionNameMap.set(sessionId, display)
           })
           items = items.map((item) => ({
@@ -2937,7 +3003,7 @@ export class WcdbCore {
         for (const row of (q.rows || []) as Array<Record<string, any>>) {
           const username = this.pickFirstStringField(row, ['username', 'user_name', 'userName'])
           if (!username) continue
-          const display = this.pickFirstStringField(row, [
+          const display = this.pickFirstDisplayNameField(row, [
             'remark', 'Remark',
             'nick_name', 'nickName', 'nickname', 'NickName',
             'alias', 'Alias'
@@ -2980,7 +3046,12 @@ export class WcdbCore {
       const map = JSON.parse(jsonStr)
       if (map && typeof map === 'object') {
         for (const username of toFetch) {
-          const display = String((map as Record<string, unknown>)[username] || '').trim()
+          const rawDisplay = (map as Record<string, unknown>)[username]
+          const display = typeof rawDisplay === 'string'
+            ? rawDisplay
+            : rawDisplay === null || rawDisplay === undefined
+              ? ''
+              : String(rawDisplay).trim()
           if (!display) continue
           resultMap[username] = display
           this.writeDisplayNameCache(username, display, now)
@@ -3468,7 +3539,7 @@ export class WcdbCore {
     }
   }
 
-  async getContactTypeCounts(): Promise<{ success: boolean; counts?: { private: number; group: number; official: number; former_friend: number }; error?: string }> {
+  async getContactTypeCounts(): Promise<{ success: boolean; counts?: { private: number; group: number; official: number; former_friend: number; blocked?: number }; error?: string }> {
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
     const runFallback = async (reason: string) => {
       const contactsResult = await this.getContactsCompact()
@@ -3494,7 +3565,8 @@ export class WcdbCore {
           private: Number(raw.private || 0),
           group: Number(raw.group || 0),
           official: Number(raw.official || 0),
-          former_friend: Number(raw.former_friend || 0)
+          former_friend: Number(raw.former_friend || 0),
+          blocked: Number(raw.blocked || 0)
         }
       }
     } catch (e) {

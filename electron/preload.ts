@@ -21,10 +21,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     click: (payload: any) => ipcRenderer.send('notification-clicked', payload),
     ready: () => ipcRenderer.send('notification:ready'),
     resize: (width: number, height: number) => ipcRenderer.send('notification:resize', { width, height }),
+    // 原生玻璃面板：卡片实测几何上报 / 退场淡出 / 亮度带回调（Windows 原生模式专用）
+    glassRect: (payload: any) => ipcRenderer.send('notification:glassRect', payload),
+    glassHide: () => ipcRenderer.send('notification:glassHide'),
+    onLuma: (callback: (bands: any) => void) => {
+      const listener = (_: any, bands: any) => callback(bands)
+      ipcRenderer.on('notification:luma', listener)
+      return () => ipcRenderer.removeListener('notification:luma', listener)
+    },
     onShow: (callback: (event: any, data: any) => void) => {
       ipcRenderer.on('notification:show', callback)
       return () => ipcRenderer.removeAllListeners('notification:show')
-    }, // 监听原本发送出来的navigate-to-session事件，跳转到具体的会话
+    },
+    // 监听原本发送出来的navigate-to-session事件，跳转到具体的会话
     onNavigateToSession: (callback: (sessionId: string) => void) => {
       const listener = (_: any, sessionId: string) => callback(sessionId)
       ipcRenderer.on('navigate-to-session', listener)
@@ -146,7 +155,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         source?: 'chat' | 'export'
         initialDisplayName?: string
         initialAvatarUrl?: string
-        initialContactType?: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
+        initialContactType?: 'friend' | 'group' | 'official' | 'former_friend' | 'blocked' | 'other'
       }
     ) =>
       ipcRenderer.invoke('window:openSessionChatWindow', sessionId, options)
@@ -224,7 +233,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }) =>
       ipcRenderer.invoke('chat:getNewMessages', sessionId, minTime, limit, cursor),
     getContact: (username: string) => ipcRenderer.invoke('chat:getContact', username),
-    getContactAvatar: (username: string) => ipcRenderer.invoke('chat:getContactAvatar', username),
+    getContactAvatar: (username: string, chatroomId?: string) => ipcRenderer.invoke('chat:getContactAvatar', username, chatroomId),
     updateMessage: (sessionId: string, localId: number, createTime: number, newContent: string) =>
       ipcRenderer.invoke('chat:updateMessage', sessionId, localId, createTime, newContent),
     deleteMessage: (sessionId: string, localId: number, createTime: number, dbPathHint?: string) =>
@@ -284,7 +293,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       offset?: number
     }) => ipcRenderer.invoke('chat:getMediaStream', options),
     resolveVoiceCache: (sessionId: string, msgId: string) => ipcRenderer.invoke('chat:resolveVoiceCache', sessionId, msgId),
-    getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number) => ipcRenderer.invoke('chat:getVoiceTranscript', sessionId, msgId, createTime),
+    getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number) => ipcRenderer.invoke('chat:getVoiceTranscript', sessionId, msgId, createTime, serverId),
     onVoiceTranscriptPartial: (callback: (payload: { sessionId?: string; msgId: string; createTime?: number; text: string }) => void) => {
       const listener = (_: any, payload: { sessionId?: string; msgId: string; createTime?: number; text: string }) => callback(payload)
       ipcRenderer.on('chat:voiceTranscriptPartial', listener)
@@ -582,6 +591,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   biz: {
     listAccounts: (account?: string) => ipcRenderer.invoke('biz:listAccounts', account),
+    listAccountHealth: (account?: string) => ipcRenderer.invoke('biz:listAccountHealth', account),
     listMessages: (username: string, account?: string, limit?: number, offset?: number) =>
         ipcRenderer.invoke('biz:listMessages', username, account, limit, offset),
     listPayRecords: (account?: string, limit?: number, offset?: number) =>

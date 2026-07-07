@@ -5,33 +5,9 @@ import { buildGroupNicknameIdCandidates } from '../../export/contacts/groupNickn
 import { appendTransferDesc, isTransferExportContent, resolveTransferDesc } from '../../export/parsers/transferParser';
 import { formatTimestamp } from '../../export/utils/timestamp';
 import { parallelLimit } from '../../export/utils/parallelLimit';
+import { buildMarkdownBlockquote, escapeMarkdownLinkText, escapeMarkdownText, toMarkdownUrl } from '../../export/utils/markdown';
 import { ExportDisplayProfile, MediaExportItem } from '../../export/types';
 import { wcdbService } from '../../wcdbService';
-
-const escapeMarkdownText = (value: unknown): string => {
-  return String(value ?? '')
-    .replace(/\\/g, '\\\\')
-    .replace(/([`*_{}\[\]<>#+\-.!|])/g, '\\$1')
-}
-
-const escapeMarkdownLinkText = (value: unknown): string => {
-  return escapeMarkdownText(value).replace(/\r?\n/g, ' ')
-}
-
-const toMarkdownUrl = (value: string): string => {
-  return encodeURI(value)
-    .replace(/\(/g, '%28')
-    .replace(/\)/g, '%29')
-    .replace(/</g, '%3C')
-    .replace(/>/g, '%3E')
-}
-
-const buildMarkdownBlockquote = (value: string): string => {
-  return value
-    .split(/\r?\n/)
-    .map(line => `> ${line ? escapeMarkdownText(line) : ''}`)
-    .join('\n')
-}
 
 export class MarkdownFormatter {
   constructor(private exportService: any) {}
@@ -205,7 +181,7 @@ export class MarkdownFormatter {
         let voiceTranscribed = 0
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg: any) => {
           this.exportService.throwIfStopRequested(control)
-          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername)
+          const transcript = await this.exportService.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername, msg.serverIdRaw || msg.serverId)
           voiceTranscriptMap.set(this.exportService.getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({

@@ -2,6 +2,7 @@ import React from 'react'
 import { Check } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
 import type { ChatSession, Message } from '../../types/models'
+import { displayNameOrFallback } from '../../utils/displayName'
 
 export interface ChatMessageBubbleProps {
   message: Message
@@ -20,13 +21,24 @@ export interface ChatMessageBubbleProps {
   avatarUrl?: string
   isGroupChat?: boolean
   resolvedSenderName?: string
+  avatarProfile?: MessageAvatarProfile
   isSelectionMode?: boolean
   isSelected?: boolean
   onContextMenu?: (event: React.MouseEvent, message: Message) => void
+  onAvatarContextMenu?: (event: React.MouseEvent, message: Message, profile: MessageAvatarProfile) => void
   onToggleSelection?: (messageKey: string, isShiftKey?: boolean) => void
   actionNode?: React.ReactNode
   children: React.ReactNode
   portal?: React.ReactNode
+}
+
+export interface MessageAvatarProfile {
+  username?: string
+  displayName: string
+  groupNickname?: string
+  avatarUrl?: string
+  isSelf?: boolean
+  isGroupMember?: boolean
 }
 
 function SelectionCheckbox({ checked, side }: { checked?: boolean; side: 'left' | 'right' }) {
@@ -54,9 +66,11 @@ function ChatMessageBubble({
   avatarUrl,
   isGroupChat,
   resolvedSenderName,
+  avatarProfile,
   isSelectionMode,
   isSelected,
   onContextMenu,
+  onAvatarContextMenu,
   onToggleSelection,
   actionNode,
   children,
@@ -64,7 +78,7 @@ function ChatMessageBubble({
 }: ChatMessageBubbleProps) {
   const bubbleClass = isSystem ? 'system' : (isSent ? 'sent' : 'received')
   const avatarName = !isSent
-    ? (isGroupChat ? (resolvedSenderName || '?') : (session.displayName || session.username))
+    ? (isGroupChat ? displayNameOrFallback('?', resolvedSenderName) : displayNameOrFallback(session.username, session.displayName))
     : '我'
 
   return (
@@ -89,14 +103,22 @@ function ChatMessageBubble({
           className={`message-bubble ${bubbleClass} ${isEmoji && emojiHasAsset && !emojiError ? 'emoji' : ''} ${isImage ? 'image' : ''} ${isVideo ? 'video' : ''} ${isVoice ? 'voice' : ''}`}
           onContextMenu={(event) => onContextMenu?.(event, message)}
         >
-          <div className="bubble-avatar">
+          <div
+            className="bubble-avatar"
+            onContextMenu={(event) => {
+              if (!avatarProfile || isSystem) return
+              event.preventDefault()
+              event.stopPropagation()
+              onAvatarContextMenu?.(event, message, avatarProfile)
+            }}
+          >
             <Avatar src={avatarUrl} name={avatarName} size={36} className="bubble-avatar" />
           </div>
           <div className="bubble-body">
             {isGroupChat && !isSent && (
               <div className="sender-line">
                 <div className="sender-name">
-                  {resolvedSenderName || '群成员'}
+                  {displayNameOrFallback('群成员', resolvedSenderName)}
                 </div>
                 {actionNode}
               </div>
@@ -137,9 +159,11 @@ function areEqual(prev: ChatMessageBubbleProps, next: ChatMessageBubbleProps) {
     prev.avatarUrl === next.avatarUrl &&
     prev.isGroupChat === next.isGroupChat &&
     prev.resolvedSenderName === next.resolvedSenderName &&
+    prev.avatarProfile === next.avatarProfile &&
     prev.isSelectionMode === next.isSelectionMode &&
     prev.isSelected === next.isSelected &&
     prev.onContextMenu === next.onContextMenu &&
+    prev.onAvatarContextMenu === next.onAvatarContextMenu &&
     prev.onToggleSelection === next.onToggleSelection &&
     prev.actionNode === next.actionNode &&
     prev.children === next.children &&

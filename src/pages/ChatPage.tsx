@@ -9,7 +9,8 @@ import { useBatchTranscribeStore, type BatchVoiceTaskType } from '../stores/batc
 import { useBatchImageDecryptStore } from '../stores/batchImageDecryptStore'
 import type { ChatRecordItem, ChatSession, Message } from '../types/models'
 import type { GroupSummaryRecord, GroupSummaryRecordSummary } from '../types/electron'
-import { getEmojiPath } from 'wechat-emojis'
+import { renderTextWithEmoji } from '../utils/renderTextWithEmoji'
+import { displayNameOrFallback, pickDisplayName } from '../utils/displayName'
 import { VoiceTranscribeDialog } from '../components/VoiceTranscribeDialog'
 import { LivePhotoIcon } from '../components/LivePhotoIcon'
 import { AnimatedStreamingText } from '../components/AnimatedStreamingText'
@@ -31,7 +32,7 @@ import {
   requestExportSessionStatus
 } from '../services/exportBridge'
 import ChatHeader from './Chat/ChatHeader'
-import ChatMessageBubble from './Chat/ChatMessageBubble'
+import ChatMessageBubble, { type MessageAvatarProfile } from './Chat/ChatMessageBubble'
 import { buildNewMessagesCursor } from './Chat/messageCursor'
 import {
   subscribeSharedImageCacheResolved,
@@ -105,15 +106,17 @@ const MESSAGE_VIRTUAL_OVERSCAN_PX = 140
 const QUOTED_MESSAGE_PROBE_LIMIT = 180
 const QUOTED_MESSAGE_MISSING_TIP = '引用消息不存在'
 const BYTES_PER_MEGABYTE = 1024 * 1024
+// 图片/表情缓存值现在几乎都是文件路径（小字符串），字节上限只防御 base64 兜底路径
 const EMOJI_CACHE_MAX_ENTRIES = 260
-const EMOJI_CACHE_MAX_BYTES = 32 * BYTES_PER_MEGABYTE
+const EMOJI_CACHE_MAX_BYTES = 16 * BYTES_PER_MEGABYTE
 const IMAGE_CACHE_MAX_ENTRIES = 360
-const IMAGE_CACHE_MAX_BYTES = 64 * BYTES_PER_MEGABYTE
+const IMAGE_CACHE_MAX_BYTES = 32 * BYTES_PER_MEGABYTE
 const VOICE_CACHE_MAX_ENTRIES = 120
-const VOICE_CACHE_MAX_BYTES = 24 * BYTES_PER_MEGABYTE
+const VOICE_CACHE_MAX_BYTES = 16 * BYTES_PER_MEGABYTE
 const VOICE_TRANSCRIPT_CACHE_MAX_ENTRIES = 1800
 const VOICE_TRANSCRIPT_CACHE_MAX_BYTES = 2 * BYTES_PER_MEGABYTE
 const SENDER_AVATAR_CACHE_MAX_ENTRIES = 2000
+const SENDER_AVATAR_CACHE_TTL_MS = 5 * 60 * 1000
 const AUTO_MEDIA_TASK_MAX_CONCURRENCY = 2
 const AUTO_MEDIA_TASK_MAX_QUEUE = 80
 
@@ -477,6 +480,10 @@ function normalizeSearchIdentityText(value?: string | null): string | undefined 
   return normalized
 }
 
+function normalizeDisplayIdentityText(value?: string | null): string | undefined {
+  return pickDisplayName(value)
+}
+
 function normalizeSearchAvatarUrl(value?: string | null): string | undefined {
   const normalized = String(value || '').trim()
   if (!normalized) return undefined
@@ -492,7 +499,7 @@ function resolveSessionDisplayName(
   sessionId?: string | null
 ): string | undefined {
   const normalizedSessionId = String(sessionId || '').trim()
-  const normalizedDisplayName = normalizeSearchIdentityText(displayName)
+  const normalizedDisplayName = normalizeDisplayIdentityText(displayName)
   if (!normalizedDisplayName) return undefined
   if (normalizedSessionId && normalizedDisplayName === normalizedSessionId) return undefined
   return normalizedDisplayName
@@ -515,7 +522,7 @@ function resolveSearchSenderDisplayName(
   senderUsername?: string | null,
   sessionId?: string | null
 ): string | undefined {
-  const normalizedDisplayName = normalizeSearchIdentityText(displayName)
+  const normalizedDisplayName = normalizeDisplayIdentityText(displayName)
   if (!normalizedDisplayName) return undefined
 
   const normalizedSenderUsername = normalizeSearchIdentityText(senderUsername)
@@ -778,6 +785,85 @@ function safeParseJson<T>(raw: string | null): T | null {
   }
 }
 
+const SIDEBAR_USER_PROFILE_CACHE_KEY = 'sidebar_user_profile_cache_v1'
+const ACCOUNT_PROFILES_CACHE_KEY = 'account_profiles_cache_v1'
+
+interface CachedCurrentUserProfile {
+  wxid?: string
+  displayName?: string
+  alias?: string
+  avatarUrl?: string
+}
+
+function normalizeAccountIdForProfile(value?: string | null): string {
+  const trimmed = String(value || '').trim()
+  if (!trimmed) return ''
+  if (trimmed.toLowerCase().startsWith('wxid_')) {
+    const match = trimmed.match(/^(wxid_[^_]+)/i)
+    return match?.[1] || trimmed
+  }
+  const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
+  return suffixMatch ? suffixMatch[1] : trimmed
+}
+
+function isUsefulCurrentUserName(value?: string | null, wxid?: string | null): value is string {
+  const name = String(value || '').trim()
+  if (!name) return false
+  const lower = name.toLowerCase()
+  if (name === '我' || name === '微信用户' || lower === 'self') return false
+  if (lower.startsWith('wxid_')) return false
+  const normalizedWxid = normalizeAccountIdForProfile(wxid).toLowerCase()
+  if (normalizedWxid && normalizeAccountIdForProfile(name).toLowerCase() === normalizedWxid) return false
+  return true
+}
+
+function readCachedCurrentUserProfile(preferredWxid?: string | null): CachedCurrentUserProfile | null {
+  if (typeof window === 'undefined') return null
+  const preferredRaw = String(preferredWxid || '').trim()
+  const preferredNormalized = normalizeAccountIdForProfile(preferredRaw)
+  const isSameAccount = (candidate?: string | null): boolean => {
+    const raw = String(candidate || '').trim()
+    if (!raw) return !preferredRaw && !preferredNormalized
+    if (!preferredRaw && !preferredNormalized) return true
+    return raw.toLowerCase() === preferredRaw.toLowerCase() ||
+      normalizeAccountIdForProfile(raw).toLowerCase() === preferredNormalized.toLowerCase()
+  }
+
+  const sidebarProfile = safeParseJson<CachedCurrentUserProfile & { updatedAt?: number }>(
+    window.localStorage.getItem(SIDEBAR_USER_PROFILE_CACHE_KEY)
+  )
+  if (sidebarProfile?.wxid && isSameAccount(sidebarProfile.wxid)) {
+    return {
+      wxid: normalizeAccountIdForProfile(sidebarProfile.wxid) || sidebarProfile.wxid,
+      displayName: sidebarProfile.displayName,
+      alias: sidebarProfile.alias,
+      avatarUrl: sidebarProfile.avatarUrl
+    }
+  }
+
+  const accountProfiles = safeParseJson<Record<string, CachedCurrentUserProfile & { updatedAt?: number }>>(
+    window.localStorage.getItem(ACCOUNT_PROFILES_CACHE_KEY)
+  ) || {}
+  const candidates = [
+    preferredRaw,
+    preferredNormalized,
+    ...Object.keys(accountProfiles)
+  ].filter(Boolean)
+
+  for (const key of candidates) {
+    const profile = accountProfiles[key]
+    if (!profile || !isSameAccount(key)) continue
+    return {
+      wxid: preferredNormalized || normalizeAccountIdForProfile(key) || key,
+      displayName: profile.displayName,
+      alias: profile.alias,
+      avatarUrl: profile.avatarUrl
+    }
+  }
+
+  return null
+}
+
 function formatYmdDateFromSeconds(timestamp?: number): string {
   if (!timestamp || !Number.isFinite(timestamp)) return '—'
   const d = new Date(timestamp * 1000)
@@ -796,6 +882,11 @@ function formatYmdHmDateTime(timestamp?: number): string {
   const h = `${d.getHours()}`.padStart(2, '0')
   const min = `${d.getMinutes()}`.padStart(2, '0')
   return `${y}-${m}-${day} ${h}:${min}`
+}
+
+function formatYmdHmDateTimeFromSeconds(timestamp?: number): string {
+  if (!timestamp || !Number.isFinite(timestamp)) return ''
+  return formatYmdHmDateTime(timestamp * 1000)
 }
 
 function formatDateInputLocal(date: Date): string {
@@ -880,6 +971,40 @@ interface SessionContactProfile {
   updatedAt: number
 }
 
+interface AvatarProfileTarget extends MessageAvatarProfile {
+  username?: string
+  sourceLabel?: string
+  messageTime?: number
+  canOpenMoments: boolean
+}
+
+interface AvatarProfileDetail {
+  wxid: string
+  displayName: string
+  remark?: string
+  nickName?: string
+  alias?: string
+  avatarUrl?: string
+  messageCount?: number
+}
+
+interface AvatarProfileMomentPreview {
+  id: string
+  src: string
+  kind: 'image' | 'video'
+}
+
+interface AvatarProfileCardState {
+  x: number
+  y: number
+  target: AvatarProfileTarget
+  detail?: AvatarProfileDetail | null
+  detailLoading: boolean
+  detailError?: string | null
+  momentsLoading: boolean
+  momentPreviews: AvatarProfileMomentPreview[]
+}
+
 type GroupMessageCountStatus = 'loading' | 'ready' | 'failed'
 
 interface GroupPanelMember {
@@ -934,15 +1059,15 @@ function normalizeQuotedGroupMember(member: Partial<GroupPanelMember> | null | u
   const username = String(member?.username || '').trim()
   if (!username) return null
 
-  const displayName = String(member?.displayName || '').trim()
-  const nickname = String(member?.nickname || '').trim()
-  const remark = String(member?.remark || '').trim()
-  const alias = String(member?.alias || '').trim()
-  const groupNickname = String(member?.groupNickname || '').trim()
+  const displayName = pickDisplayName(member?.displayName) || ''
+  const nickname = pickDisplayName(member?.nickname) || ''
+  const remark = pickDisplayName(member?.remark) || ''
+  const alias = pickDisplayName(member?.alias) || ''
+  const groupNickname = pickDisplayName(member?.groupNickname) || ''
 
   return {
     username,
-    displayName: displayName || groupNickname || remark || nickname || alias || username,
+    displayName: displayNameOrFallback(username, displayName, groupNickname, remark, nickname, alias),
     avatarUrl: member?.avatarUrl,
     nickname,
     alias,
@@ -984,34 +1109,34 @@ function resolveQuotedSenderUsername(
 }
 
 function resolveQuotedGroupMemberDisplayName(member: GroupPanelMember): string | undefined {
-  const remark = normalizeSearchIdentityText(member.remark)
-  if (remark) return remark
-
-  const groupNickname = normalizeSearchIdentityText(member.groupNickname)
+  const groupNickname = normalizeDisplayIdentityText(member.groupNickname)
   if (groupNickname) return groupNickname
 
-  const nickname = normalizeSearchIdentityText(member.nickname)
+  const remark = normalizeDisplayIdentityText(member.remark)
+  if (remark) return remark
+
+  const nickname = normalizeDisplayIdentityText(member.nickname)
   if (nickname) return nickname
 
   const displayName = resolveSearchSenderDisplayName(member.displayName, member.username)
   if (displayName) return displayName
 
-  const alias = normalizeSearchIdentityText(member.alias)
+  const alias = normalizeDisplayIdentityText(member.alias)
   if (alias) return alias
 
   return resolveSearchSenderUsernameFallback(member.username)
 }
 
 function resolveQuotedPrivateDisplayName(contact: any): string | undefined {
-  const remark = normalizeSearchIdentityText(contact?.remark)
+  const remark = normalizeDisplayIdentityText(contact?.remark)
   if (remark) return remark
 
-  const nickname = normalizeSearchIdentityText(
+  const nickname = normalizeDisplayIdentityText(
     contact?.nickName || contact?.nick_name || contact?.nickname
   )
   if (nickname) return nickname
 
-  const alias = normalizeSearchIdentityText(contact?.alias)
+  const alias = normalizeDisplayIdentityText(contact?.alias)
   if (alias) return alias
 
   return undefined
@@ -1124,7 +1249,10 @@ async function resolveQuotedSenderDisplayName(options: {
     }
 
     try {
-      const profile = await window.electronAPI.chat.getContactAvatar(normalizedSender)
+      const profile = await window.electronAPI.chat.getContactAvatar(
+        normalizedSender,
+        options.isGroupChat ? normalizedSessionId : undefined
+      )
       const profileDisplayName = normalizeSearchIdentityText(profile?.displayName)
       if (profileDisplayName && !isWxidLikeSearchIdentity(profileDisplayName)) {
         quotedSenderDisplayCache.set(cacheKey, {
@@ -1368,6 +1496,7 @@ const SessionItem = React.memo(function SessionItem({
     }
     return <span className="session-summary">{session.summary || '暂无消息'}</span>
   }, [session.matchedField, session.username, session.alias, session.summary, searchKeyword])
+  const sessionDisplayName = displayNameOrFallback(session.username, session.displayName)
 
   return (
     <div
@@ -1376,7 +1505,7 @@ const SessionItem = React.memo(function SessionItem({
     >
       <Avatar
         src={session.avatarUrl}
-        name={session.displayName || session.username}
+        name={sessionDisplayName}
         size={48}
         className={session.username.includes('@chatroom') ? 'group' : ''}
       />
@@ -1386,9 +1515,9 @@ const SessionItem = React.memo(function SessionItem({
             {(() => {
               const shouldHighlight = (session.matchedField as any) === 'name' && searchKeyword
               return shouldHighlight ? (
-                <HighlightText text={session.displayName || session.username} keyword={searchKeyword} />
+                <HighlightText text={sessionDisplayName} keyword={searchKeyword} />
               ) : (
-                session.displayName || session.username
+                sessionDisplayName
               )
             })()}
           </span>
@@ -1583,6 +1712,8 @@ function ChatPage(props: ChatPageProps) {
   const [isPreparingExportDialog, setIsPreparingExportDialog] = useState(false)
   const [chatSnsTimelineTarget, setChatSnsTimelineTarget] = useState<ContactSnsTimelineTarget | null>(null)
   const [exportPrepareHint, setExportPrepareHint] = useState('')
+  const avatarProfileRequestSeqRef = useRef(0)
+  const [avatarProfileCard, setAvatarProfileCard] = useState<AvatarProfileCardState | null>(null)
 
   // 消息右键菜单
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, message: Message } | null>(null)
@@ -1790,7 +1921,13 @@ function ChatPage(props: ChatPageProps) {
     const sessionDisplayName = resolveSessionDisplayName(session.displayName, username)
     const previousDisplayName = resolveSessionDisplayName(previousSession?.displayName, username)
     const profileDisplayName = resolveSessionDisplayName(profile?.displayName, username)
-    const resolvedDisplayName = sessionDisplayName || previousDisplayName || profileDisplayName || session.displayName || username
+    const resolvedDisplayName = displayNameOrFallback(
+      username,
+      sessionDisplayName,
+      previousDisplayName,
+      profileDisplayName,
+      session.displayName
+    )
 
     const sessionAvatarUrl = normalizeSearchAvatarUrl(session.avatarUrl)
     const previousAvatarUrl = normalizeSearchAvatarUrl(previousSession?.avatarUrl)
@@ -2007,7 +2144,7 @@ function ChatPage(props: ChatPageProps) {
         }
         const result = await window.electronAPI.groupSummary.triggerManual({
           sessionId,
-          displayName: sessionInfo?.displayName || sessionId,
+          displayName: displayNameOrFallback(sessionId, sessionInfo?.displayName),
           avatarUrl: sessionInfo?.avatarUrl,
           startTime,
           endTime
@@ -2023,7 +2160,7 @@ function ChatPage(props: ChatPageProps) {
       } else {
         const result = await window.electronAPI.groupSummary.triggerDay({
           sessionId,
-          displayName: sessionInfo?.displayName || sessionId,
+          displayName: displayNameOrFallback(sessionId, sessionInfo?.displayName),
           avatarUrl: sessionInfo?.avatarUrl,
           date: selectedDate
         })
@@ -2417,7 +2554,7 @@ function ChatPage(props: ChatPageProps) {
     const taskId = registerBackgroundTask({
       sourcePage: 'chat',
       title: '聊天页会话详情统计',
-      detail: `准备读取 ${sessionMapRef.current.get(normalizedSessionId)?.displayName || normalizedSessionId} 的详情`,
+      detail: `准备读取 ${displayNameOrFallback(normalizedSessionId, sessionMapRef.current.get(normalizedSessionId)?.displayName)} 的详情`,
       progressText: '基础信息',
       cancelable: true
     })
@@ -2434,7 +2571,7 @@ function ChatPage(props: ChatPageProps) {
       const sameSession = prev?.wxid === normalizedSessionId
       return {
         wxid: normalizedSessionId,
-        displayName: mappedSession?.displayName || prev?.displayName || normalizedSessionId,
+        displayName: displayNameOrFallback(normalizedSessionId, mappedSession?.displayName, prev?.displayName),
         remark: sameSession ? prev?.remark : undefined,
         nickName: sameSession ? prev?.nickName : undefined,
         alias: sameSession ? prev?.alias : undefined,
@@ -2504,7 +2641,7 @@ function ChatPage(props: ChatPageProps) {
       if (result.success && result.detail) {
         setSessionDetail((prev) => ({
           wxid: normalizedSessionId,
-          displayName: result.detail!.displayName || prev?.displayName || normalizedSessionId,
+          displayName: displayNameOrFallback(normalizedSessionId, result.detail!.displayName, prev?.displayName),
           remark: result.detail!.remark,
           nickName: result.detail!.nickName,
           alias: result.detail!.alias,
@@ -2771,12 +2908,12 @@ function ChatPage(props: ChatPageProps) {
       .map((member: GroupPanelMember): GroupPanelMember | null => {
         const username = String(member.username || '').trim()
         if (!username) return null
-        const preferredName = String(
-          member.groupNickname ||
-          member.remark ||
-          member.displayName ||
-          member.nickname ||
-          username
+        const preferredName = displayNameOrFallback(
+          username,
+          member.groupNickname,
+          member.remark,
+          member.displayName,
+          member.nickname
         )
         const rawStatus = member.messageCountStatus
         const normalizedStatus: GroupMessageCountStatus = options?.messageCountStatus
@@ -3639,7 +3776,7 @@ function ChatPage(props: ChatPageProps) {
       const updatedSessions = currentSessions.map(session => {
         const update = updates.get(session.username)
         if (update) {
-          const newDisplayName = update.displayName || session.displayName || session.username
+          const newDisplayName = displayNameOrFallback(session.username, update.displayName, session.displayName)
           const newAvatarUrl = update.avatarUrl || session.avatarUrl
           const newAlias = update.alias || session.alias
           if (newDisplayName !== session.displayName || newAvatarUrl !== session.avatarUrl || newAlias !== session.alias) {
@@ -4188,7 +4325,7 @@ function ChatPage(props: ChatPageProps) {
           currentSearchSession.username === normalizedInitialSessionId
             ? {
                 ...currentSearchSession,
-                displayName: currentSearchSession.displayName || fallbackDisplayName || currentSearchSession.username,
+                displayName: displayNameOrFallback(currentSearchSession.username, currentSearchSession.displayName, fallbackDisplayName),
                 avatarUrl: currentSearchSession.avatarUrl || fallbackAvatarUrl || undefined
               }
             : currentSearchSession
@@ -4197,7 +4334,7 @@ function ChatPage(props: ChatPageProps) {
           normalizedSessionId
             ? {
                 username: normalizedSessionId,
-                displayName: fallbackDisplayName || normalizedSessionId,
+                displayName: displayNameOrFallback(normalizedSessionId, fallbackDisplayName),
                 avatarUrl: fallbackAvatarUrl || undefined
               } as ChatSession
             : undefined
@@ -5963,7 +6100,7 @@ function ChatPage(props: ChatPageProps) {
       username: OFFICIAL_ACCOUNTS_VIRTUAL_ID,
       displayName: '公众号',
       summary: latestOfficial
-        ? `${latestOfficial.displayName || latestOfficial.username}: ${latestOfficial.summary || '查看公众号历史消息'}`
+        ? `${displayNameOrFallback(latestOfficial.username, latestOfficial.displayName)}: ${latestOfficial.summary || '查看公众号历史消息'}`
         : '查看公众号历史消息',
       type: 0,
       sortTimestamp: officialLatestTime,
@@ -5989,7 +6126,7 @@ function ChatPage(props: ChatPageProps) {
       const foldEntry: ChatSession = {
         username: 'placeholder_foldgroup',
         displayName: '折叠的聊天',
-        summary: `${latestFolded.displayName || latestFolded.username}: ${latestFolded.summary}`,
+        summary: `${displayNameOrFallback(latestFolded.username, latestFolded.displayName)}: ${latestFolded.summary}`,
         type: 0,
         sortTimestamp: latestFolded.sortTimestamp || latestFolded.lastTimestamp,
         lastTimestamp: latestFolded.lastTimestamp || latestFolded.sortTimestamp,
@@ -6129,7 +6266,7 @@ function ChatPage(props: ChatPageProps) {
       ) {
         return {
           ...found,
-          displayName: found.displayName || fallbackDisplayName || found.username,
+          displayName: displayNameOrFallback(found.username, found.displayName, fallbackDisplayName),
           avatarUrl: found.avatarUrl || fallbackAvatarUrl || undefined
         }
       }
@@ -6144,7 +6281,7 @@ function ChatPage(props: ChatPageProps) {
       sortTimestamp: 0,
       lastTimestamp: 0,
       lastMsgType: 0,
-      displayName: fallbackDisplayName || currentSessionId,
+      displayName: displayNameOrFallback(currentSessionId, fallbackDisplayName),
       avatarUrl: fallbackAvatarUrl || undefined,
     } as ChatSession
   })()
@@ -6185,7 +6322,7 @@ function ChatPage(props: ChatPageProps) {
     if (!currentSession || !isCurrentSessionPrivateSnsSupported) return
     setChatSnsTimelineTarget({
       username: currentSession.username,
-      displayName: currentSession.displayName || currentSession.username,
+      displayName: displayNameOrFallback(currentSession.username, currentSession.displayName),
       avatarUrl: currentSession.avatarUrl
     })
   }, [currentSession, isCurrentSessionPrivateSnsSupported])
@@ -6560,7 +6697,7 @@ function ChatPage(props: ChatPageProps) {
     if (inProgressExportSessionIds.has(currentSessionId) || isPreparingExportDialog) return
 
     const requestId = `chat-export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const sessionName = currentSession?.displayName || currentSession?.username || currentSessionId
+    const sessionName = displayNameOrFallback(currentSessionId, currentSession?.displayName, currentSession?.username)
     pendingExportRequestIdRef.current = requestId
     setIsPreparingExportDialog(true)
     setExportPrepareHint('')
@@ -6589,7 +6726,7 @@ function ChatPage(props: ChatPageProps) {
     try {
       const result = await window.electronAPI.insight.triggerSessionInsight({
         sessionId,
-        displayName: session?.displayName || sessionId,
+        displayName: displayNameOrFallback(sessionId, session?.displayName),
         avatarUrl: session?.avatarUrl
       })
       if (currentSessionRef.current !== sessionId) return
@@ -6693,7 +6830,7 @@ function ChatPage(props: ChatPageProps) {
       }
     }
 
-    startTranscribe(totalVoices, session.displayName || session.username, taskType, 'chat', {
+    startTranscribe(totalVoices, displayNameOrFallback(session.username, session.displayName), taskType, 'chat', {
       cancelable: true,
       resumable: true,
       onPause: () => {
@@ -6735,7 +6872,8 @@ function ChatPage(props: ChatPageProps) {
         const result = await window.electronAPI.chat.getVoiceTranscript(
           session.username,
           String(msg.localId),
-          msg.createTime
+          msg.createTime,
+          msg.serverIdRaw || msg.serverId
         )
         return { success: result.success }
       } catch {
@@ -6914,7 +7052,7 @@ function ChatPage(props: ChatPageProps) {
       }
     }
 
-    startDecrypt(totalImages, session.displayName || session.username, 'chat', {
+    startDecrypt(totalImages, displayNameOrFallback(session.username, session.displayName), 'chat', {
       cancelable: true,
       resumable: true,
       onPause: () => {
@@ -7122,6 +7260,126 @@ function ChatPage(props: ChatPageProps) {
     }
   }, [])
 
+  const clampAvatarProfilePosition = useCallback((x: number, y: number) => {
+    const viewportPadding = 12
+    const estimatedCardWidth = 340
+    const estimatedCardHeight = 560
+    const maxLeft = Math.max(viewportPadding, window.innerWidth - estimatedCardWidth - viewportPadding)
+    const maxTop = Math.max(viewportPadding, window.innerHeight - estimatedCardHeight - viewportPadding)
+    return {
+      x: Math.min(Math.max(x, viewportPadding), maxLeft),
+      y: Math.min(Math.max(y, viewportPadding), maxTop)
+    }
+  }, [])
+
+  const loadAvatarProfileExtras = useCallback(async (target: AvatarProfileTarget, requestSeq: number) => {
+    const username = String(target.username || '').trim()
+    if (!username || username === 'self') {
+      setAvatarProfileCard(prev => prev && requestSeq === avatarProfileRequestSeqRef.current
+        ? { ...prev, detailLoading: false, momentsLoading: false }
+        : prev)
+      return
+    }
+
+    const loadMomentPreviews = async (): Promise<AvatarProfileMomentPreview[]> => {
+      if (!target.canOpenMoments) return []
+      const previews: AvatarProfileMomentPreview[] = []
+      let offset = 0
+      const pageSize = 12
+      const maxPages = 5
+
+      for (let page = 0; page < maxPages && previews.length < 5; page++) {
+        if (requestSeq !== avatarProfileRequestSeqRef.current) return previews
+        const timelineResult = await window.electronAPI.sns.getTimeline(pageSize, offset, [username])
+        if (!timelineResult.success || !Array.isArray(timelineResult.timeline) || timelineResult.timeline.length === 0) {
+          break
+        }
+
+        offset += timelineResult.timeline.length
+        for (const post of timelineResult.timeline) {
+          if (previews.length >= 5) break
+          const media = post.media?.find(item => item.thumb || item.url)
+          if (!media) continue
+
+          try {
+            const proxyResult = await window.electronAPI.sns.proxyImage({
+              url: media.thumb || media.url,
+              key: media.key
+            })
+            if (requestSeq !== avatarProfileRequestSeqRef.current) return previews
+            if (proxyResult.success && proxyResult.dataUrl) {
+              previews.push({
+                id: `${post.id}-${previews.length}`,
+                src: proxyResult.dataUrl,
+                kind: 'image'
+              })
+            } else if (proxyResult.success && proxyResult.videoPath) {
+              previews.push({
+                id: `${post.id}-${previews.length}`,
+                src: `file://${proxyResult.videoPath.replace(/\\/g, '/')}`,
+                kind: 'video'
+              })
+            }
+          } catch {
+            // Try the next recent media item.
+          }
+        }
+      }
+
+      return previews
+    }
+
+    const [detailResult, previewsResult] = await Promise.allSettled([
+      window.electronAPI.chat.getSessionDetailFast(username),
+      loadMomentPreviews()
+    ])
+
+    if (requestSeq !== avatarProfileRequestSeqRef.current) return
+
+    let detail: AvatarProfileDetail | null = null
+    let detailError: string | null = null
+    if (detailResult.status === 'fulfilled' && detailResult.value?.success && detailResult.value.detail) {
+      const nextDetail = detailResult.value.detail
+      detail = {
+        wxid: nextDetail.wxid || username,
+        displayName: displayNameOrFallback(username, nextDetail.displayName, target.displayName),
+        remark: nextDetail.remark,
+        nickName: nextDetail.nickName,
+        alias: nextDetail.alias,
+        avatarUrl: nextDetail.avatarUrl || target.avatarUrl,
+        messageCount: nextDetail.messageCount
+      }
+    } else if (detailResult.status === 'fulfilled' && detailResult.value && !detailResult.value.success) {
+      detailError = detailResult.value.error || '资料补全失败'
+    } else if (detailResult.status === 'rejected') {
+      detailError = '资料补全失败'
+    }
+
+    const momentPreviews = previewsResult.status === 'fulfilled' ? previewsResult.value : []
+
+    setAvatarProfileCard(prev => {
+      if (!prev || requestSeq !== avatarProfileRequestSeqRef.current) return prev
+      const preservedDetail = prev.detail
+      return {
+        ...prev,
+        detail: detail
+          ? {
+              ...detail,
+              displayName: isUsefulCurrentUserName(preservedDetail?.displayName, username)
+                ? preservedDetail!.displayName
+                : detail.displayName,
+              alias: preservedDetail?.alias || detail.alias,
+              avatarUrl: preservedDetail?.avatarUrl || detail.avatarUrl
+            }
+          : preservedDetail,
+        detailError,
+        detailLoading: false,
+        momentsLoading: false,
+        momentPreviews
+      }
+    })
+  }, [])
+
   // 消息右键菜单处理
   const handleContextMenu = useCallback((e: React.MouseEvent, message: Message) => {
     e.preventDefault()
@@ -7133,10 +7391,103 @@ function ChatPage(props: ChatPageProps) {
     })
   }, [clampContextMenuPosition])
 
+  const handleAvatarContextMenu = useCallback((e: React.MouseEvent, message: Message, profile: MessageAvatarProfile) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu(null)
+
+    const cachedSelfProfile = profile.isSelf ? readCachedCurrentUserProfile(myWxid || profile.username) : null
+    const normalizedUsername = normalizeSearchIdentityText(
+      profile.isSelf
+        ? (cachedSelfProfile?.wxid || myWxid || profile.username)
+        : profile.username
+    ) || String(profile.username || '').trim()
+    const username = normalizedUsername || (profile.isSelf ? 'self' : undefined)
+    const canOpenMoments = Boolean(username && username !== 'self' && isSingleContactSession(username))
+    const selfDisplayName = isUsefulCurrentUserName(cachedSelfProfile?.displayName, username)
+      ? cachedSelfProfile!.displayName
+      : undefined
+    const selfAlias = isUsefulCurrentUserName(cachedSelfProfile?.alias, username)
+      ? cachedSelfProfile!.alias
+      : undefined
+    const displayName = profile.isSelf
+      ? displayNameOrFallback('微信用户', selfDisplayName, selfAlias, profile.displayName, username)
+      : displayNameOrFallback('微信用户', normalizeDisplayIdentityText(profile.displayName), profile.displayName, username)
+    const avatarUrl = normalizeSearchAvatarUrl(profile.avatarUrl) ||
+      (profile.isSelf ? normalizeSearchAvatarUrl(cachedSelfProfile?.avatarUrl) || myAvatarUrl : undefined)
+    const sourceLabel = profile.isSelf
+      ? '我发送的消息'
+      : profile.isGroupMember
+        ? displayNameOrFallback('群聊', currentSession?.displayName, currentSessionId)
+        : '当前聊天'
+    const target: AvatarProfileTarget = {
+      ...profile,
+      username,
+      displayName,
+      avatarUrl,
+      sourceLabel,
+      messageTime: message.createTime,
+      canOpenMoments
+    }
+    const initialDetail: AvatarProfileDetail | null = profile.isSelf && username && username !== 'self'
+      ? {
+          wxid: username,
+          displayName,
+          alias: selfAlias,
+          avatarUrl
+        }
+      : null
+    const nextPos = clampAvatarProfilePosition(e.clientX, e.clientY)
+    const requestSeq = ++avatarProfileRequestSeqRef.current
+
+    setAvatarProfileCard({
+      x: nextPos.x,
+      y: nextPos.y,
+      target,
+      detail: initialDetail,
+      detailLoading: Boolean(username && username !== 'self'),
+      detailError: null,
+      momentsLoading: canOpenMoments,
+      momentPreviews: []
+    })
+
+    void loadAvatarProfileExtras(target, requestSeq)
+  }, [
+    clampAvatarProfilePosition,
+    currentSession?.displayName,
+    currentSessionId,
+    loadAvatarProfileExtras,
+    myAvatarUrl,
+    myWxid
+  ])
+
+  const closeAvatarProfileCard = useCallback(() => {
+    avatarProfileRequestSeqRef.current += 1
+    setAvatarProfileCard(null)
+  }, [])
+
+  const openAvatarProfileMoments = useCallback(() => {
+    if (!avatarProfileCard?.target.canOpenMoments || !avatarProfileCard.target.username) return
+    const detail = avatarProfileCard.detail
+    setChatSnsTimelineTarget({
+      username: avatarProfileCard.target.username,
+      displayName: displayNameOrFallback(
+        avatarProfileCard.target.username,
+        detail?.remark,
+        detail?.nickName,
+        detail?.displayName,
+        avatarProfileCard.target.displayName
+      ),
+      avatarUrl: detail?.avatarUrl || avatarProfileCard.target.avatarUrl
+    })
+    closeAvatarProfileCard()
+  }, [avatarProfileCard, closeAvatarProfileCard])
+
   // 关闭右键菜单
   useEffect(() => {
     const handleClick = () => {
       setContextMenu(null)
+      setAvatarProfileCard(null)
     }
     window.addEventListener('click', handleClick)
     return () => {
@@ -7358,6 +7709,21 @@ function ChatPage(props: ChatPageProps) {
     const isSystem = isSystemMessage(msg.localType)
     const wrapperClass = isSystem ? 'system' : (isSent ? 'sent' : 'received')
     const messageKey = getMessageKey(msg)
+    const senderUsername = String(msg.senderUsername || '').trim()
+    const matchedGroupMember = isCurrentSessionGroup && senderUsername
+      ? groupPanelMembers.find((member) => (
+        isSameQuotedSenderIdentity(member.username, senderUsername) ||
+        isSameQuotedSenderIdentity(member.alias, senderUsername)
+      ))
+      : undefined
+    const groupSenderDisplayName = matchedGroupMember
+      ? resolveQuotedGroupMemberDisplayName(matchedGroupMember)
+      : undefined
+    const groupSenderNickname = pickDisplayName(
+      matchedGroupMember?.groupNickname,
+      groupSenderDisplayName,
+      isCurrentSessionGroup ? msg.senderDisplayName : undefined
+    )
 
     return (
       <div className={`message-wrapper ${wrapperClass} ${highlightedMessageSet.has(messageKey) ? 'new-message' : ''}`}>
@@ -7373,10 +7739,13 @@ function ChatPage(props: ChatPageProps) {
           myAvatarUrl={myAvatarUrl}
           myWxid={myWxid}
           isGroupChat={isCurrentSessionGroup}
+          groupSenderDisplayName={groupSenderDisplayName}
+          groupSenderNickname={groupSenderNickname}
           quoteLayout={quoteLayout}
           autoTranscribeVoiceEnabled={autoTranscribeVoiceEnabled}
           onRequireModelDownload={handleRequireModelDownload}
           onContextMenu={handleContextMenu}
+          onAvatarContextMenu={handleAvatarContextMenu}
           onJumpToQuotedMessage={handleJumpToQuotedMessage}
           isSelectionMode={isSelectionMode}
           messageKey={messageKey}
@@ -7396,10 +7765,12 @@ function ChatPage(props: ChatPageProps) {
     myAvatarUrl,
     myWxid,
     isCurrentSessionGroup,
+    groupPanelMembers,
     quoteLayout,
     autoTranscribeVoiceEnabled,
     handleRequireModelDownload,
     handleContextMenu,
+    handleAvatarContextMenu,
     handleJumpToQuotedMessage,
     isSelectionMode,
     selectedMessages,
@@ -7597,12 +7968,12 @@ function ChatPage(props: ChatPageProps) {
                       >
                         <Avatar
                           src={session?.avatarUrl}
-                          name={session?.displayName || sessionId}
+                          name={displayNameOrFallback(sessionId, session?.displayName)}
                           size={48}
                         />
                         <div className="session-content">
                           <div className="session-top">
-                            <span className="session-name">{session?.displayName || sessionId}</span>
+                            <span className="session-name">{displayNameOrFallback(sessionId, session?.displayName)}</span>
                           </div>
                           <div className="session-preview">
                             <HighlightTextNoTruncate text={firstMsg.parsedContent || firstMsg.content || ''} keyword={globalMsgQuery} />
@@ -7873,10 +8244,10 @@ function ChatPage(props: ChatPageProps) {
                       )
                       const resolvedSenderUsername = resolveSearchSenderUsernameFallback(msg.senderUsername)
                       const resolvedSenderAvatarUrl = normalizeSearchAvatarUrl(msg.senderAvatarUrl)
-                      const resolvedCurrentSessionName = normalizeSearchIdentityText(currentSession?.displayName) ||
+                      const resolvedCurrentSessionName = normalizeDisplayIdentityText(currentSession?.displayName) ||
                         resolveSearchSenderUsernameFallback(currentSession?.username) ||
                         resolveSearchSenderUsernameFallback(currentSessionId)
-                      const senderName = resolvedSenderDisplayName || (
+                      const senderName = pickDisplayName(resolvedSenderDisplayName) || (
                         msg.isSend === 1
                           ? '我'
                           : (isCurrentSessionPrivateSnsSupported
@@ -8019,47 +8390,50 @@ function ChatPage(props: ChatPageProps) {
                     <div className="detail-empty">{groupMemberSearchKeyword.trim() ? '暂无匹配成员' : '暂无群成员数据'}</div>
                   ) : (
                     <div className="group-members-list">
-                      {filteredGroupPanelMembers.map((member) => (
-                        <div key={member.username} className="group-member-item">
-                          <div className="group-member-main">
-                            <Avatar
-                              src={member.avatarUrl}
-                              name={member.displayName || member.username}
-                              size={34}
-                              className="group-member-avatar"
-                            />
-                            <div className="group-member-meta">
-                              <div className="group-member-name-row">
-                                <span className="group-member-name" title={member.displayName || member.username}>
-                                  {member.displayName || member.username}
-                                </span>
-                                <div className="group-member-badges">
-                                  {member.isOwner && (
-                                    <span className="member-flag owner" title="群主">
-                                      群主
-                                    </span>
-                                  )}
-                                  {member.isFriend && (
-                                    <span className="member-flag friend" title="好友">
-                                      好友
-                                    </span>
-                                  )}
+                      {filteredGroupPanelMembers.map((member) => {
+                        const memberDisplayName = displayNameOrFallback(member.username, member.displayName)
+                        return (
+                          <div key={member.username} className="group-member-item">
+                            <div className="group-member-main">
+                              <Avatar
+                                src={member.avatarUrl}
+                                name={memberDisplayName}
+                                size={34}
+                                className="group-member-avatar"
+                              />
+                              <div className="group-member-meta">
+                                <div className="group-member-name-row">
+                                  <span className="group-member-name" title={memberDisplayName}>
+                                    {memberDisplayName}
+                                  </span>
+                                  <div className="group-member-badges">
+                                    {member.isOwner && (
+                                      <span className="member-flag owner" title="群主">
+                                        群主
+                                      </span>
+                                    )}
+                                    {member.isFriend && (
+                                      <span className="member-flag friend" title="好友">
+                                        好友
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
+                                <span className="group-member-id" title={member.alias || member.username}>
+                                  {member.alias || member.username}
+                                </span>
                               </div>
-                              <span className="group-member-id" title={member.alias || member.username}>
-                                {member.alias || member.username}
-                              </span>
                             </div>
+                            <span className={`group-member-count ${member.messageCountStatus}`}>
+                              {member.messageCountStatus === 'loading'
+                                ? '统计中'
+                                : member.messageCountStatus === 'failed'
+                                  ? '统计失败'
+                                  : `${member.messageCount.toLocaleString()} 条`}
+                            </span>
                           </div>
-                          <span className={`group-member-count ${member.messageCountStatus}`}>
-                            {member.messageCountStatus === 'loading'
-                              ? '统计中'
-                              : member.messageCountStatus === 'failed'
-                                ? '统计失败'
-                                : `${member.messageCount.toLocaleString()} 条`}
-                          </span>
-                        </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   )}
                 </div>
@@ -8070,7 +8444,7 @@ function ChatPage(props: ChatPageProps) {
                   <div className="detail-header">
                     <div className="detail-title-wrap">
                       <h4>AI 群聊总结</h4>
-                      <span className="detail-title-sub">{currentSession?.displayName || currentSessionId}</span>
+                      <span className="detail-title-sub">{displayNameOrFallback(currentSessionId || '', currentSession?.displayName)}</span>
                     </div>
                     <button className="close-btn" onClick={() => setShowGroupSummaryPanel(false)}>
                       <X size={16} />
@@ -8210,13 +8584,24 @@ function ChatPage(props: ChatPageProps) {
                       <div className="detail-overview-card">
                         <Avatar
                           src={currentSession?.avatarUrl}
-                          name={sessionDetail.remark || sessionDetail.nickName || currentSession?.displayName || sessionDetail.wxid}
+                          name={displayNameOrFallback(
+                            sessionDetail.wxid,
+                            sessionDetail.remark,
+                            sessionDetail.nickName,
+                            currentSession?.displayName
+                          )}
                           size={42}
                           className="detail-overview-avatar"
                         />
                         <div className="detail-overview-meta">
                           <span className="detail-overview-name">
-                            {sessionDetail.remark || sessionDetail.nickName || currentSession?.displayName || sessionDetail.alias || sessionDetail.wxid}
+                            {displayNameOrFallback(
+                              sessionDetail.wxid,
+                              sessionDetail.remark,
+                              sessionDetail.nickName,
+                              currentSession?.displayName,
+                              sessionDetail.alias
+                            )}
                           </span>
                           <span className="detail-overview-sub">
                             {sessionDetail.alias || sessionDetail.wxid}
@@ -8725,6 +9110,23 @@ function ChatPage(props: ChatPageProps) {
         document.body
       )}
 
+      {avatarProfileCard && createPortal(
+        <>
+          <div
+            className="avatar-profile-overlay"
+            onClick={closeAvatarProfileCard}
+          />
+          <AvatarProfileCard
+            card={avatarProfileCard}
+            copiedField={copiedField}
+            onClose={closeAvatarProfileCard}
+            onOpenMoments={openAvatarProfileMoments}
+            onCopy={(text, field) => void handleCopyField(text, field)}
+          />
+        </>,
+        document.body
+      )}
+
       {/* 消息信息弹窗 */}
       {showMessageInfo && createPortal(
         <div className="message-info-overlay" onClick={() => setShowMessageInfo(null)}>
@@ -9127,7 +9529,7 @@ type SharedImageDecryptResult = {
   failureKind?: 'not_found' | 'decrypt_failed'
 }
 const imageDecryptInFlight = new Map<string, Promise<SharedImageDecryptResult>>()
-const senderAvatarCache = createBoundedCache<{ avatarUrl?: string; displayName?: string }>({
+const senderAvatarCache = createBoundedCache<{ avatarUrl?: string; displayName?: string; updatedAt?: number }>({
   maxEntries: SENDER_AVATAR_CACHE_MAX_ENTRIES
 })
 const senderAvatarLoading = new Map<string, Promise<{ avatarUrl?: string; displayName?: string } | null>>()
@@ -9288,13 +9690,13 @@ function MessageInsightControl({
     try {
       const result = await window.electronAPI.insight.generateMessageInsight({
         sessionId: session.username,
-        displayName: displayName || session.displayName || session.username,
+        displayName: displayNameOrFallback(session.username, displayName, session.displayName),
         avatarUrl: avatarUrl || session.avatarUrl,
         targetLocalId: message.localId,
         targetCreateTime: message.createTime,
         targetMessageKey: messageKey,
         targetText,
-        targetSenderName: senderName || displayName || session.displayName || session.username,
+        targetSenderName: displayNameOrFallback(session.username, senderName, displayName, session.displayName),
         contextCount,
         forceRefresh
       })
@@ -9397,6 +9799,155 @@ function MessageInsightControl({
   )
 }
 
+function AvatarProfileMomentThumb({ preview }: { preview: AvatarProfileMomentPreview }) {
+  if (preview.kind === 'video') {
+    return <video src={preview.src} muted preload="metadata" playsInline />
+  }
+
+  return <img src={preview.src} alt="" loading="lazy" referrerPolicy="no-referrer" />
+}
+
+function AvatarProfileCard({
+  card,
+  copiedField,
+  onClose,
+  onOpenMoments,
+  onCopy
+}: {
+  card: AvatarProfileCardState
+  copiedField: string | null
+  onClose: () => void
+  onOpenMoments: () => void
+  onCopy: (text: string, field: string) => void
+}) {
+  const { target, detail } = card
+  const username = detail?.wxid || target.username || ''
+  const displayName = displayNameOrFallback(
+    '微信用户',
+    detail?.remark,
+    detail?.nickName,
+    detail?.displayName,
+    target.displayName,
+    username
+  )
+  const groupNickname = target.isGroupMember ? pickDisplayName(target.groupNickname) : ''
+  const nickname = detail?.nickName && detail.nickName !== displayName ? detail.nickName : ''
+  const alias = detail?.alias || ''
+  const avatarUrl = detail?.avatarUrl || target.avatarUrl
+  const momentSummaryText = card.momentsLoading
+    ? '加载最近动态...'
+    : card.momentPreviews.length > 0
+      ? `最近 ${card.momentPreviews.length} 个媒体`
+      : (target.canOpenMoments ? '暂无可预览媒体' : '不支持朋友圈')
+  const messageDate = target.messageTime ? formatYmdHmDateTimeFromSeconds(target.messageTime) : ''
+  const profileRows = [
+    groupNickname ? { label: '群昵称', value: groupNickname } : null,
+    nickname ? { label: '昵称', value: nickname } : null,
+    detail?.remark ? { label: '备注', value: detail.remark } : null,
+    alias ? { label: '微信号', value: alias, copyField: 'avatarProfileAlias' } : null,
+    username ? { label: '微信ID', value: username, copyField: 'avatarProfileWxid' } : null
+  ].filter(Boolean) as Array<{ label: string; value: string; copyField?: string }>
+  const moreRows = [
+    target.sourceLabel ? { label: '来源', value: target.sourceLabel } : null,
+    messageDate ? { label: '消息时间', value: messageDate } : null,
+    Number.isFinite(detail?.messageCount)
+      ? { label: '聊天记录', value: `${Number(detail?.messageCount || 0).toLocaleString('zh-CN')} 条` }
+      : null
+  ].filter(Boolean) as Array<{ label: string; value: string }>
+
+  return (
+    <div
+      className="avatar-profile-card"
+      style={{ top: card.y, left: card.x }}
+      onClick={(event) => event.stopPropagation()}
+      role="dialog"
+      aria-label="个人信息"
+    >
+      <button className="avatar-profile-close" type="button" onClick={onClose} title="关闭">
+        <X size={15} />
+      </button>
+
+      <div className="avatar-profile-hero">
+        <Avatar src={avatarUrl} name={displayName} size={58} className="avatar-profile-photo" lazy={false} />
+        <div className="avatar-profile-title">
+          <h3>{displayName}</h3>
+          <p>{target.isSelf ? '我' : (target.isGroupMember ? '群聊成员' : '聊天联系人')}</p>
+        </div>
+      </div>
+
+      <div className="avatar-profile-section">
+        {card.detailLoading && profileRows.length === 0 ? (
+          <div className="avatar-profile-loading">
+            <Loader2 size={14} className="spin" />
+            <span>正在补全资料...</span>
+          </div>
+        ) : profileRows.length > 0 ? (
+          profileRows.map(row => (
+            <div className="avatar-profile-row" key={row.label}>
+              <span>{row.label}</span>
+              <strong title={row.value}>{row.value}</strong>
+              {row.copyField && (
+                <button
+                  type="button"
+                  className="avatar-profile-copy"
+                  onClick={() => onCopy(row.value, row.copyField!)}
+                  title="复制"
+                >
+                  {copiedField === row.copyField ? <Check size={12} /> : <Copy size={12} />}
+                </button>
+              )}
+            </div>
+          ))
+        ) : (
+          <div className="avatar-profile-empty">暂无更多资料</div>
+        )}
+        {card.detailError && <div className="avatar-profile-error">{card.detailError}</div>}
+      </div>
+
+      <button
+        className={`avatar-profile-moments ${target.canOpenMoments ? '' : 'disabled'}`}
+        type="button"
+        onClick={target.canOpenMoments ? onOpenMoments : undefined}
+        disabled={!target.canOpenMoments}
+      >
+        <div className="avatar-profile-moments-head">
+          <span>朋友圈</span>
+          <strong>{momentSummaryText}</strong>
+        </div>
+        {card.momentsLoading ? (
+          <div className="avatar-profile-moments-loading">
+            <Loader2 size={14} className="spin" />
+          </div>
+        ) : card.momentPreviews.length > 0 ? (
+          <div className="avatar-profile-moment-strip">
+            {card.momentPreviews.slice(0, 5).map(preview => (
+              <div className="avatar-profile-moment-thumb" key={preview.id}>
+                <AvatarProfileMomentThumb preview={preview} />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="avatar-profile-moments-empty">
+            {target.canOpenMoments ? '最近动态里暂未找到图片或视频' : '群聊和公众号不显示朋友圈'}
+          </div>
+        )}
+      </button>
+
+      {moreRows.length > 0 && (
+        <div className="avatar-profile-section compact">
+          {moreRows.map(row => (
+            <div className="avatar-profile-row" key={row.label}>
+              <span>{row.label}</span>
+              <strong title={row.value}>{row.value}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+
+    </div>
+  )
+}
+
 function MessageBubble({
   message,
   messageKey,
@@ -9405,10 +9956,13 @@ function MessageBubble({
   myAvatarUrl,
   myWxid,
   isGroupChat,
+  groupSenderDisplayName,
+  groupSenderNickname,
   quoteLayout,
   autoTranscribeVoiceEnabled,
   onRequireModelDownload,
   onContextMenu,
+  onAvatarContextMenu,
   onJumpToQuotedMessage,
   isSelectionMode,
   isSelected,
@@ -9423,10 +9977,13 @@ function MessageBubble({
   myAvatarUrl?: string;
   myWxid?: string;
   isGroupChat?: boolean;
+  groupSenderDisplayName?: string;
+  groupSenderNickname?: string;
   quoteLayout: configService.QuoteLayout;
   autoTranscribeVoiceEnabled?: boolean;
   onRequireModelDownload?: (sessionId: string, messageId: string) => void;
   onContextMenu?: (e: React.MouseEvent, message: Message) => void;
+  onAvatarContextMenu?: (e: React.MouseEvent, message: Message, profile: MessageAvatarProfile) => void;
   onJumpToQuotedMessage?: (target: QuotedMessageJumpTarget) => void;
   isSelectionMode?: boolean;
   isSelected?: boolean;
@@ -9753,9 +10310,20 @@ function MessageBubble({
   // 群聊中获取发送者信息 (如果自己发的没头像，也尝试拉取)
   useEffect(() => {
     const sender = String(message.senderUsername || '').trim()
-    const cached = sender ? senderAvatarCache.get(sender) : undefined
-    setSenderAvatarUrl(cached?.avatarUrl || message.senderAvatarUrl || undefined)
-    setSenderName(cached?.displayName || message.senderDisplayName || undefined)
+    const profileCacheKey = sender
+      ? `${isGroupChat ? session.username : 'contact'}::${sender}`
+      : ''
+    const cached = profileCacheKey ? senderAvatarCache.get(profileCacheKey) : undefined
+    const cachedFresh = Boolean(
+      cached &&
+      (!isGroupChat || Date.now() - (cached.updatedAt || 0) < SENDER_AVATAR_CACHE_TTL_MS)
+    )
+    setSenderAvatarUrl((cachedFresh ? cached?.avatarUrl : undefined) || message.senderAvatarUrl || undefined)
+    setSenderName(pickDisplayName(
+      groupSenderDisplayName,
+      cachedFresh ? cached?.displayName : undefined,
+      message.senderDisplayName
+    ))
 
     if (!sender || !(isGroupChat || (isSent && !myAvatarUrl))) return
 
@@ -9769,14 +10337,14 @@ function MessageBubble({
       if (result.displayName) setSenderName(result.displayName)
     }
 
-    if (cached) {
+    if (cachedFresh && cached) {
       applyProfile(cached)
       return () => {
         cancelled = true
       }
     }
 
-    const pending = senderAvatarLoading.get(sender)
+    const pending = senderAvatarLoading.get(profileCacheKey)
     if (pending) {
       pending.then(applyProfile).catch(() => { })
       return () => {
@@ -9784,23 +10352,23 @@ function MessageBubble({
       }
     }
 
-    const request = window.electronAPI.chat.getContactAvatar(sender)
-    senderAvatarLoading.set(sender, request)
+    const request = window.electronAPI.chat.getContactAvatar(sender, isGroupChat ? session.username : undefined)
+    senderAvatarLoading.set(profileCacheKey, request)
     request.then((result: { avatarUrl?: string; displayName?: string } | null) => {
       if (result) {
-        senderAvatarCache.set(sender, result)
+        senderAvatarCache.set(profileCacheKey, { ...result, updatedAt: Date.now() })
       }
       applyProfile(result)
     }).catch(() => { }).finally(() => {
-      if (senderAvatarLoading.get(sender) === request) {
-        senderAvatarLoading.delete(sender)
+      if (senderAvatarLoading.get(profileCacheKey) === request) {
+        senderAvatarLoading.delete(profileCacheKey)
       }
     })
 
     return () => {
       cancelled = true
     }
-  }, [isGroupChat, isSent, message.senderAvatarUrl, message.senderDisplayName, message.senderUsername, myAvatarUrl])
+  }, [groupSenderDisplayName, isGroupChat, isSent, message.senderAvatarUrl, message.senderDisplayName, message.senderUsername, myAvatarUrl, session.username])
 
   // 解析转账消息的付款方和收款方显示名称
   useEffect(() => {
@@ -10324,7 +10892,8 @@ function MessageBubble({
       const result = await window.electronAPI.chat.getVoiceTranscript(
           session.username,
           String(message.localId),
-          message.createTime
+          message.createTime,
+          message.serverIdRaw || message.serverId
       )
 
       if (result.success) {
@@ -10470,33 +11039,6 @@ function MessageBubble({
   const cleanMessageContent = useCallback((content: string) => {
     if (!content) return ''
     return content.replace(/^[a-zA-Z0-9]+@openim:\n?/, '')
-  }, [])
-
-  // 解析混合文本和表情
-  const renderTextWithEmoji = useCallback((text: string) => {
-    if (!text) return text
-    const parts = text.split(/\[(.*?)\]/g)
-    return parts.map((part, index) => {
-      // 奇数索引是捕获组的内容（即括号内的文字）
-      if (index % 2 === 1) {
-        // @ts-ignore
-        const path = getEmojiPath(part as any)
-        if (path) {
-          // path 例如 'assets/face/微笑.png'，需要添加 base 前缀
-          return (
-            <img
-              key={index}
-              src={`${import.meta.env.BASE_URL}${path}`}
-              alt={`[${part}]`}
-              className="inline-emoji"
-              style={{ width: 22, height: 22, verticalAlign: 'bottom', margin: '0 1px' }}
-            />
-          )
-        }
-        return `[${part}]`
-      }
-      return part
-    })
   }, [])
 
   const cleanedParsedContent = useMemo(
@@ -10659,12 +11201,44 @@ function MessageBubble({
   // - 自己发的：优先使用 myAvatarUrl，缺失则用 senderAvatarUrl (补救)
   // - 群聊中对方发的：使用发送者头像
   // - 私聊中对方发的：使用会话头像
-  const fallbackSenderName = String(message.senderDisplayName || message.senderUsername || '').trim() || undefined
-  const resolvedSenderName = senderName || fallbackSenderName
+  const fallbackSenderName = pickDisplayName(message.senderDisplayName, message.senderUsername)
+  const resolvedSenderName = pickDisplayName(groupSenderDisplayName, senderName, fallbackSenderName)
   const resolvedSenderAvatarUrl = senderAvatarUrl || message.senderAvatarUrl
   const avatarUrl = isSent
     ? (myAvatarUrl || resolvedSenderAvatarUrl)
     : (isGroupChat ? resolvedSenderAvatarUrl : session.avatarUrl)
+  const avatarProfile = useMemo<MessageAvatarProfile>(() => {
+    const username = isSent
+      ? (myWxid || message.senderUsername || session.selfWxid || undefined)
+      : (isGroupChat ? (message.senderUsername || undefined) : session.username)
+    return {
+      username: normalizeSearchIdentityText(username) || username,
+      displayName: isSent
+        ? '我'
+        : (isGroupChat
+            ? displayNameOrFallback('群成员', resolvedSenderName, message.senderDisplayName, message.senderUsername)
+            : displayNameOrFallback('微信用户', session.displayName, session.username)),
+      groupNickname: isGroupChat && !isSent
+        ? pickDisplayName(groupSenderNickname, groupSenderDisplayName)
+        : undefined,
+      avatarUrl,
+      isSelf: isSent,
+      isGroupMember: Boolean(isGroupChat && !isSent)
+    }
+  }, [
+    avatarUrl,
+    isGroupChat,
+    isSent,
+    groupSenderDisplayName,
+    groupSenderNickname,
+    message.senderDisplayName,
+    message.senderUsername,
+    myWxid,
+    resolvedSenderName,
+    session.displayName,
+    session.selfWxid,
+    session.username
+  ])
   const canShowMessageInsight = Boolean(
     aiMessageInsightEnabled &&
     !isSent &&
@@ -10684,9 +11258,9 @@ function MessageBubble({
       message={message}
       messageKey={messageKey}
       session={session}
-      displayName={session.displayName || session.username}
+      displayName={displayNameOrFallback(session.username, session.displayName)}
       avatarUrl={avatarUrl}
-      senderName={resolvedSenderName || session.displayName || session.username}
+      senderName={displayNameOrFallback(session.username, resolvedSenderName, session.displayName)}
       targetText={cleanedParsedContent}
       contextCount={aiMessageInsightContextCount || 50}
       compact={!isGroupChat}
@@ -10695,7 +11269,7 @@ function MessageBubble({
 
   // 是否有引用消息
   const hasQuote = quotedContent.length > 0
-  const displayQuotedSenderName = quotedSenderName || quotedSenderFallbackName
+  const displayQuotedSenderName = pickDisplayName(quotedSenderName, quotedSenderFallbackName)
   const quotedJumpTarget = useMemo<QuotedMessageJumpTarget | null>(() => {
     if (!hasQuote) return null
 
@@ -12037,9 +12611,11 @@ function MessageBubble({
       avatarUrl={avatarUrl}
       isGroupChat={isGroupChat}
       resolvedSenderName={resolvedSenderName}
+      avatarProfile={avatarProfile}
       isSelectionMode={isSelectionMode}
       isSelected={isSelected}
       onContextMenu={onContextMenu}
+      onAvatarContextMenu={onAvatarContextMenu}
       onToggleSelection={onToggleSelection}
       actionNode={messageInsightControl}
       portal={systemAlertPortal}
@@ -12056,12 +12632,15 @@ const MemoMessageBubble = React.memo(MessageBubble, (prevProps, nextProps) => {
   if (prevProps.myAvatarUrl !== nextProps.myAvatarUrl) return false
   if (prevProps.myWxid !== nextProps.myWxid) return false
   if (prevProps.isGroupChat !== nextProps.isGroupChat) return false
+  if (prevProps.groupSenderDisplayName !== nextProps.groupSenderDisplayName) return false
+  if (prevProps.groupSenderNickname !== nextProps.groupSenderNickname) return false
   if (prevProps.quoteLayout !== nextProps.quoteLayout) return false
   if (prevProps.autoTranscribeVoiceEnabled !== nextProps.autoTranscribeVoiceEnabled) return false
   if (prevProps.isSelectionMode !== nextProps.isSelectionMode) return false
   if (prevProps.isSelected !== nextProps.isSelected) return false
   if (prevProps.onRequireModelDownload !== nextProps.onRequireModelDownload) return false
   if (prevProps.onContextMenu !== nextProps.onContextMenu) return false
+  if (prevProps.onAvatarContextMenu !== nextProps.onAvatarContextMenu) return false
   if (prevProps.onJumpToQuotedMessage !== nextProps.onJumpToQuotedMessage) return false
   if (prevProps.onToggleSelection !== nextProps.onToggleSelection) return false
   if (prevProps.aiMessageInsightEnabled !== nextProps.aiMessageInsightEnabled) return false

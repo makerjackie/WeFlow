@@ -1393,8 +1393,15 @@ export class ExportContext {
         if (normalizedSessionId.startsWith('gh_')) return '公众号_'
         const rawLocalType = contact?.local_type ?? contact?.localType ?? contact?.WCDB_CT_local_type;
         const localType = Number.parseInt(String(rawLocalType ?? ''), 10);
+        const rawFlag = contact?.flag ?? contact?.contact_flag ?? contact?.contactFlag ?? contact?.WCDB_CT_flag;
+        const flag = Number.parseInt(String(rawFlag ?? '0'), 10);
         const quanPin = String(contact?.quan_pin ?? contact?.quanPin ?? contact?.WCDB_CT_quan_pin ?? '').trim();
-        if (Number.isFinite(localType) && localType === 0 && quanPin) {
+        const alias = String(contact?.alias ?? contact?.WCDB_CT_alias ?? '').trim();
+        const remark = String(contact?.remark ?? contact?.WCDB_CT_remark ?? '').trim();
+        if (Number.isFinite(localType) && (
+          (localType === 0 && quanPin) ||
+          (localType === 3 && Number.isFinite(flag) && flag !== 4 && (quanPin || alias || remark))
+        )) {
           return '曾经的好友_'
         }
 
@@ -2912,9 +2919,13 @@ export class ExportContext {
             destFileName = `${md5}${ext || '.gif'}`
           } else if (kind === 'file') {
             const safeBaseName = path.basename(String(msg?.fileName || path.basename(sourcePath))).replace(/[\\/:*?"<>|]/g, '_') || path.basename(sourcePath)
-            destFileName = `${String(msg?.localId || Date.now())}_${safeBaseName}`
+            destFileName = safeBaseName
           }
-          const destPath = path.join(targetDir, destFileName)
+          let destPath = path.join(targetDir, destFileName)
+          if (kind === 'file' && this.resolveExportConflictStrategy(options) === 'rename') {
+            destPath = await reserveUniqueOutputPath(destPath, new Set<string>())
+            destFileName = path.basename(destPath)
+          }
           if (path.resolve(sourcePath) !== path.resolve(destPath)) {
             if (kind === 'image' || kind === 'emoji' || kind === 'video') {
               const copied = await this.copyMediaWithCacheAndDedup(kind, sourcePath, destPath, options.control, options)
@@ -3199,7 +3210,7 @@ export class ExportContext {
           normalized.push({
             localId,
             createTime,
-            serverId: msg?.serverId,
+            serverId: msg?.serverIdRaw || msg?.serverId,
             senderWxid: msg?.senderUsername || null
           })
         }
@@ -3245,7 +3256,7 @@ export class ExportContext {
             sessionId,
             msgId,
             Number.isFinite(Number(msg?.createTime)) ? Number(msg.createTime) : undefined,
-            msg?.serverId,
+            msg?.serverIdRaw || msg?.serverId,
             msg?.senderUsername || undefined
           )
           if (!voiceResult.success || !voiceResult.data) {
@@ -3273,9 +3284,9 @@ export class ExportContext {
     /**
      * 转写语音为文字
      */
-    public async transcribeVoice(sessionId: string, msgId: string, createTime: number, senderWxid: string | null): Promise<string> {
+    public async transcribeVoice(sessionId: string, msgId: string, createTime: number, senderWxid: string | null, serverId?: string | number): Promise<string> {
         try {
-          const transcript = await chatService.getVoiceTranscript(sessionId, msgId, createTime, undefined, senderWxid || undefined)
+          const transcript = await chatService.getVoiceTranscript(sessionId, msgId, createTime, undefined, senderWxid || undefined, serverId)
           if (transcript.success) {
             const text = String(transcript.transcript || '').trim()
             return text ? `[语音转文字] ${text}` : '[语音消息 - 未识别到文字]'
@@ -3945,10 +3956,12 @@ export class ExportContext {
             return null
           }
 
-          const safeBaseName = path.basename(fileNameRaw).replace(/[\\/:*?"<>|]/g, '_') || 'file'
-          const messageId = String(msg?.localId || Date.now())
-          const destFileName = `${messageId}_${safeBaseName}`
-          const destPath = path.join(fileDir, destFileName)
+          let destFileName = path.basename(fileNameRaw).replace(/[\\/:*?"<>|]/g, '_') || 'file'
+          let destPath = path.join(fileDir, destFileName)
+          if (this.resolveExportConflictStrategy(options) === 'rename') {
+            destPath = await reserveUniqueOutputPath(destPath, new Set<string>())
+            destFileName = path.basename(destPath)
+          }
           const existedBeforeCopy = await pathExists(destPath)
           if (existedBeforeCopy && this.shouldReuseExistingExportFile(options)) {
             this.noteMediaTelemetry({ doneFiles: 1, dedupReuseFiles: 1 })
@@ -4406,7 +4419,15 @@ export class ExportContext {
           control,
           onCollectProgress
         )
-        if (weliveCollected) return weliveCollected
+        if (weliveCollected) {
+          // WeLive 原始数据收集报错（文件缺失 / JSONL 解析失败）意味着数据不完整。
+          // 调用方（各 formatter）不会检查 error 字段，这里必须直接抛错让会话导出失败，
+          // 禁止把截断或空结果当作成功输出（issue #1129 的 WeFlow 侧防线）。
+          if (weliveCollected.error) {
+            throw new Error(`WeLive 原始导出数据不完整: ${weliveCollected.error}`)
+          }
+          return weliveCollected
+        }
 
         const rows: any[] = [];
         const memberSet = new Map<string, { member: ChatLabMember; avatarUrl?: string }>();

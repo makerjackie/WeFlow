@@ -1,7 +1,11 @@
 import { Notification } from "electron";
-import { avatarFileCache, AvatarFileCacheService } from "./avatarFileCacheService";
+import { avatarFileCache } from "./avatarFileCacheService";
 
-export interface LinuxNotificationData {
+// 系统通知服务（Linux / macOS）：走各自系统的通知中心（Linux 底层为
+// D-Bus/libnotify，macOS 为通知中心），Windows 使用特制的液态玻璃通知窗口。
+// 声音、勿扰模式、通知历史均由系统按用户设置管理
+
+export interface SystemNotificationData {
   sessionId?: string;
   title: string;
   content: string;
@@ -13,6 +17,9 @@ export interface LinuxNotificationData {
 }
 
 type NotificationCallback = (payload: unknown) => void;
+
+const isSupportedPlatform =
+  process.platform === "linux" || process.platform === "darwin";
 
 let notificationCallbacks: NotificationCallback[] = [];
 let notificationCounter = 1;
@@ -39,20 +46,20 @@ function triggerNotificationCallback(payload: unknown): void {
     try {
       callback(payload);
     } catch (error) {
-      console.error("[LinuxNotification] Callback error:", error);
+      console.error("[SystemNotification] Callback error:", error);
     }
   }
 }
 
-export async function showLinuxNotification(
-  data: LinuxNotificationData,
+export async function showSystemNotification(
+  data: SystemNotificationData,
 ): Promise<number | null> {
-  if (process.platform !== "linux") {
+  if (!isSupportedPlatform) {
     return null;
   }
 
   if (!Notification.isSupported()) {
-    console.warn("[LinuxNotification] Notification API is not supported");
+    console.warn("[SystemNotification] Notification API is not supported");
     return null;
   }
 
@@ -91,12 +98,15 @@ export async function showLinuxNotification(
     });
 
     notification.on("failed", (_, error) => {
-      console.error("[LinuxNotification] Notification failed:", error);
+      console.error("[SystemNotification] Notification failed:", error);
       clearNotificationState(notificationId);
     });
 
+    // Linux 的部分通知服务不会自动过期，需要手动关闭兜底；
+    // macOS 横幅由系统自动收起并保留在通知中心，手动 close 反而会把它
+    // 从通知中心移除，因此不做超时关闭
     const expireTimeout = data.expireTimeout ?? 5000;
-    if (expireTimeout > 0) {
+    if (process.platform === "linux" && expireTimeout > 0) {
       const timer = setTimeout(() => {
         const currentNotification = activeNotifications.get(notificationId);
         if (currentNotification) {
@@ -109,35 +119,14 @@ export async function showLinuxNotification(
     notification.show();
 
     console.log(
-      `[LinuxNotification] Shown notification ${notificationId}: ${data.title}`,
+      `[SystemNotification] Shown notification ${notificationId}: ${data.title}`,
     );
 
     return notificationId;
   } catch (error) {
-    console.error("[LinuxNotification] Failed to show notification:", error);
+    console.error("[SystemNotification] Failed to show notification:", error);
     return null;
   }
-}
-
-export async function closeLinuxNotification(
-  notificationId: number,
-): Promise<void> {
-  const notification = activeNotifications.get(notificationId);
-  if (!notification) return;
-  notification.close();
-  clearNotificationState(notificationId);
-}
-
-export async function getCapabilities(): Promise<string[]> {
-  if (process.platform !== "linux") {
-    return [];
-  }
-
-  if (!Notification.isSupported()) {
-    return [];
-  }
-
-  return ["native-notification", "click"];
 }
 
 export function onNotificationAction(callback: NotificationCallback): void {
@@ -153,23 +142,21 @@ export function removeNotificationCallback(
   }
 }
 
-export async function initLinuxNotificationService(): Promise<void> {
-  if (process.platform !== "linux") {
-    console.log("[LinuxNotification] Not on Linux, skipping init");
+export async function initSystemNotificationService(): Promise<void> {
+  if (!isSupportedPlatform) {
+    console.log("[SystemNotification] Platform uses custom window, skipping init");
     return;
   }
 
   if (!Notification.isSupported()) {
-    console.warn("[LinuxNotification] Notification API is not supported");
+    console.warn("[SystemNotification] Notification API is not supported");
     return;
   }
 
-  const caps = await getCapabilities();
-  console.log("[LinuxNotification] Service initialized with native API:", caps);
+  console.log("[SystemNotification] Service initialized for", process.platform);
 }
 
-export async function shutdownLinuxNotificationService(): Promise<void> {
-  // 清理所有活动的通知
+export async function shutdownSystemNotificationService(): Promise<void> {
   for (const [id, notification] of activeNotifications) {
     try {
       notification.close();
@@ -182,5 +169,5 @@ export async function shutdownLinuxNotificationService(): Promise<void> {
     await avatarFileCache.clearCache();
   } catch {}
 
-  console.log("[LinuxNotification] Service shutdown complete");
+  console.log("[SystemNotification] Service shutdown complete");
 }

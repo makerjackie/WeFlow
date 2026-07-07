@@ -1,40 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Routes, Route, Navigate, useNavigate, useLocation, type Location } from 'react-router-dom'
 import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
 import RouteGuard from './components/RouteGuard'
-import WelcomePage from './pages/WelcomePage'
 import HomePage from './pages/HomePage'
-import ChatPage from './pages/ChatPage'
-import AnalyticsPage from './pages/AnalyticsPage'
-import AnalyticsWelcomePage from './pages/AnalyticsWelcomePage'
-import ChatAnalyticsHubPage from './pages/ChatAnalyticsHubPage'
-import AnnualReportPage from './pages/AnnualReportPage'
-import AnnualReportWindow from './pages/AnnualReportWindow'
-import DualReportPage from './pages/DualReportPage'
-import DualReportWindow from './pages/DualReportWindow'
-import AgreementPage from './pages/AgreementPage'
-import GroupAnalyticsPage from './pages/GroupAnalyticsPage'
-import SettingsPage from './pages/SettingsPage'
-import ExportPage from './pages/Export/ExportPage'
-import MyFootprintPage from './pages/MyFootprintPage'
-import VideoWindow from './pages/VideoWindow'
-import ImageWindow from './pages/ImageWindow'
-import SnsPage from './pages/SnsPage'
-import BizPage from './pages/BizPage'
-import ContactsPage from './pages/ContactsPage'
-import ResourcesPage from './pages/ResourcesPage'
-import ChatHistoryPage from './pages/ChatHistoryPage'
-import NotificationWindow from './pages/NotificationWindow'
-import AccountManagementPage from './pages/AccountManagementPage'
-import BackupPage from './pages/BackupPage'
-import InsightInboxPage from './pages/InsightInboxPage'
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId, type ThemeMode } from './stores/themeStore'
 import * as configService from './services/config'
 import * as cloudControl from './services/cloudControl'
-import { Download, X, Shield } from 'lucide-react'
+import { Shield } from 'lucide-react'
 import './App.scss'
 
 import UpdateDialog from './components/UpdateDialog'
@@ -42,6 +17,36 @@ import UpdateProgressCapsule from './components/UpdateProgressCapsule'
 import LockScreen from './components/LockScreen'
 import { GlobalSessionMonitor } from './components/GlobalSessionMonitor'
 import WindowCloseDialog from './components/WindowCloseDialog'
+import { resolveAutomationScopeKey } from './pages/Export/hooks/useAutomation'
+
+// 全部页面懒加载：主窗口首屏只解析 App 壳 + HomePage；
+// 常驻的通知窗口等独立窗口路由也因此只加载各自的小 chunk，
+// 显著降低每个渲染进程的 JS 堆占用与启动时间
+const WelcomePage = lazy(() => import('./pages/WelcomePage'))
+const ChatPage = lazy(() => import('./pages/ChatPage'))
+const AnalyticsWelcomePage = lazy(() => import('./pages/AnalyticsWelcomePage'))
+const ChatAnalyticsHubPage = lazy(() => import('./pages/ChatAnalyticsHubPage'))
+const AgreementPage = lazy(() => import('./pages/AgreementPage'))
+const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const MyFootprintPage = lazy(() => import('./pages/MyFootprintPage'))
+const VideoWindow = lazy(() => import('./pages/VideoWindow'))
+const ImageWindow = lazy(() => import('./pages/ImageWindow'))
+const SnsPage = lazy(() => import('./pages/SnsPage'))
+const BizPage = lazy(() => import('./pages/BizPage'))
+const ContactsPage = lazy(() => import('./pages/ContactsPage'))
+const ResourcesPage = lazy(() => import('./pages/ResourcesPage'))
+const ChatHistoryPage = lazy(() => import('./pages/ChatHistoryPage'))
+const NotificationWindow = lazy(() => import('./pages/NotificationWindow'))
+const AccountManagementPage = lazy(() => import('./pages/AccountManagementPage'))
+const BackupPage = lazy(() => import('./pages/BackupPage'))
+const InsightInboxPage = lazy(() => import('./pages/InsightInboxPage'))
+const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'))
+const GroupAnalyticsPage = lazy(() => import('./pages/GroupAnalyticsPage'))
+const AnnualReportPage = lazy(() => import('./pages/AnnualReportPage'))
+const AnnualReportWindow = lazy(() => import('./pages/AnnualReportWindow'))
+const DualReportPage = lazy(() => import('./pages/DualReportPage'))
+const DualReportWindow = lazy(() => import('./pages/DualReportWindow'))
+const ExportPage = lazy(() => import('./pages/Export/ExportPage'))
 
 function RouteStateRedirect({ to }: { to: string }) {
   const location = useLocation()
@@ -90,6 +95,8 @@ function App() {
     ? settingsRouteState?.backgroundLocation ?? settingsBackgroundRef.current
     : location
   const isExportRoute = routeLocation.pathname === '/export'
+  // Export 模块按需挂载：首次进入导出页，或存在启用的自动化任务（调度器在导出页内）时才挂载
+  const [exportMounted, setExportMounted] = useState(false)
   const [themeHydrated, setThemeHydrated] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showCloseDialog, setShowCloseDialog] = useState(false)
@@ -117,6 +124,32 @@ function App() {
       settingsBackgroundRef.current = location
     }
   }, [location])
+
+  const isStandaloneWindow =
+    isAgreementWindow || isOnboardingWindow || isVideoPlayerWindow || isChatHistoryWindow ||
+    isStandaloneChatWindow || isNotificationWindow || isAnnualReportWindow || isDualReportWindow ||
+    location.pathname === '/image-viewer-window'
+
+  useEffect(() => {
+    if (isExportRoute && !exportMounted) setExportMounted(true)
+  }, [isExportRoute, exportMounted])
+
+  // 存在启用的自动化导出任务时，即使未访问导出页也需挂载（30s 调度器运行在导出页内）
+  useEffect(() => {
+    if (exportMounted || isStandaloneWindow) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const scopeKey = await resolveAutomationScopeKey()
+        const item = await configService.getExportAutomationTasks(scopeKey)
+        if (!cancelled && item?.tasks?.some(task => task.enabled)) setExportMounted(true)
+      } catch {
+        // 读取失败视为无自动化任务
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exportMounted, isStandaloneWindow])
 
   useEffect(() => {
     const removeCloseConfirmListener = window.electronAPI.window.onCloseConfirmRequested((payload) => {
@@ -482,27 +515,47 @@ function App() {
 
   // 独立协议窗口
   if (isAgreementWindow) {
-    return <AgreementPage />
+    return (
+      <Suspense fallback={null}>
+        <AgreementPage />
+      </Suspense>
+    )
   }
 
   if (isOnboardingWindow) {
-    return <WelcomePage standalone />
+    return (
+      <Suspense fallback={null}>
+        <WelcomePage standalone />
+      </Suspense>
+    )
   }
 
   // 独立视频播放窗口
   if (isVideoPlayerWindow) {
-    return <VideoWindow />
+    return (
+      <Suspense fallback={null}>
+        <VideoWindow />
+      </Suspense>
+    )
   }
 
   // 独立图片查看窗口
   const isImageViewerWindow = location.pathname === '/image-viewer-window'
   if (isImageViewerWindow) {
-    return <ImageWindow />
+    return (
+      <Suspense fallback={null}>
+        <ImageWindow />
+      </Suspense>
+    )
   }
 
   // 独立聊天记录窗口
   if (isChatHistoryWindow) {
-    return <ChatHistoryPage />
+    return (
+      <Suspense fallback={null}>
+        <ChatHistoryPage />
+      </Suspense>
+    )
   }
 
   // 独立会话聊天窗口（仅显示聊天内容区域）
@@ -514,30 +567,44 @@ function App() {
     const standaloneInitialAvatarUrl = params.get('initialAvatarUrl')
     const standaloneInitialContactType = params.get('initialContactType')
     return (
-      <ChatPage
-        standaloneSessionWindow
-        initialSessionId={sessionId}
-        standaloneSource={standaloneSource}
-        standaloneInitialDisplayName={standaloneInitialDisplayName}
-        standaloneInitialAvatarUrl={standaloneInitialAvatarUrl}
-        standaloneInitialContactType={standaloneInitialContactType}
-      />
+      <Suspense fallback={null}>
+        <ChatPage
+          standaloneSessionWindow
+          initialSessionId={sessionId}
+          standaloneSource={standaloneSource}
+          standaloneInitialDisplayName={standaloneInitialDisplayName}
+          standaloneInitialAvatarUrl={standaloneInitialAvatarUrl}
+          standaloneInitialContactType={standaloneInitialContactType}
+        />
+      </Suspense>
     )
   }
 
   // 独立通知窗口
   if (isNotificationWindow) {
-    return <NotificationWindow />
+    return (
+      <Suspense fallback={null}>
+        <NotificationWindow />
+      </Suspense>
+    )
   }
 
   // 独立年度报告全屏窗口
   if (isAnnualReportWindow) {
-    return <AnnualReportWindow />
+    return (
+      <Suspense fallback={null}>
+        <AnnualReportWindow />
+      </Suspense>
+    )
   }
 
   // 独立双人报告全屏窗口
   if (isDualReportWindow) {
-    return <DualReportWindow />
+    return (
+      <Suspense fallback={null}>
+        <DualReportWindow />
+      </Suspense>
+    )
   }
 
   // 主窗口 - 完整布局
@@ -696,38 +763,45 @@ function App() {
         <Sidebar collapsed={sidebarCollapsed} />
         <main className="content">
           <RouteGuard>
-            <div className={`export-keepalive-page ${isExportRoute ? 'active' : 'hidden'}`} aria-hidden={!isExportRoute}>
-              <ExportPage />
-            </div>
+            {/* Export 模块按需挂载（首次访问或有自动化任务时），挂载后 keepalive 保持任务/调度状态 */}
+            {exportMounted && (
+              <Suspense fallback={null}>
+                <div className={`export-keepalive-page ${isExportRoute ? 'active' : 'hidden'}`} aria-hidden={!isExportRoute}>
+                  <ExportPage />
+                </div>
+              </Suspense>
+            )}
 
-            <Routes location={routeLocation}>
-              <Route path="/" element={<HomePage />} />
-              <Route path="/home" element={<HomePage />} />
-              <Route path="/account-management" element={<AccountManagementPage />} />
-              <Route path="/chat" element={<ChatPage />} />
+            <Suspense fallback={null}>
+              <Routes location={routeLocation}>
+                <Route path="/" element={<HomePage />} />
+                <Route path="/home" element={<HomePage />} />
+                <Route path="/account-management" element={<AccountManagementPage />} />
+                <Route path="/chat" element={<ChatPage />} />
 
-              <Route path="/analytics" element={<ChatAnalyticsHubPage />} />
-              <Route path="/analytics/private" element={<AnalyticsWelcomePage />} />
-              <Route path="/analytics/private/view" element={<AnalyticsPage />} />
-              <Route path="/analytics/group" element={<GroupAnalyticsPage />} />
-              <Route path="/analytics/view" element={<RouteStateRedirect to="/analytics/private/view" />} />
-              <Route path="/group-analytics" element={<RouteStateRedirect to="/analytics/group" />} />
-              <Route path="/annual-report" element={<AnnualReportPage />} />
-              <Route path="/annual-report/view" element={<AnnualReportWindow />} />
-              <Route path="/dual-report" element={<DualReportPage />} />
-              <Route path="/dual-report/view" element={<DualReportWindow />} />
-              <Route path="/footprint" element={<MyFootprintPage />} />
+                <Route path="/analytics" element={<ChatAnalyticsHubPage />} />
+                <Route path="/analytics/private" element={<AnalyticsWelcomePage />} />
+                <Route path="/analytics/private/view" element={<AnalyticsPage />} />
+                <Route path="/analytics/group" element={<GroupAnalyticsPage />} />
+                <Route path="/analytics/view" element={<RouteStateRedirect to="/analytics/private/view" />} />
+                <Route path="/group-analytics" element={<RouteStateRedirect to="/analytics/group" />} />
+                <Route path="/annual-report" element={<AnnualReportPage />} />
+                <Route path="/annual-report/view" element={<AnnualReportWindow />} />
+                <Route path="/dual-report" element={<DualReportPage />} />
+                <Route path="/dual-report/view" element={<DualReportWindow />} />
+                <Route path="/footprint" element={<MyFootprintPage />} />
 
-              <Route path="/export" element={<div className="export-route-anchor" aria-hidden="true" />} />
-              <Route path="/sns" element={<SnsPage />} />
-              <Route path="/insight-inbox" element={<InsightInboxPage />} />
-              <Route path="/biz" element={<BizPage />} />
-              <Route path="/contacts" element={<ContactsPage />} />
-              <Route path="/resources" element={<ResourcesPage />} />
-              <Route path="/backup" element={<BackupPage />} />
-              <Route path="/chat-history/:sessionId/:messageId" element={<ChatHistoryPage />} />
-              <Route path="/chat-history-inline/:payloadId" element={<ChatHistoryPage />} />
-            </Routes>
+                <Route path="/export" element={<div className="export-route-anchor" aria-hidden="true" />} />
+                <Route path="/sns" element={<SnsPage />} />
+                <Route path="/insight-inbox" element={<InsightInboxPage />} />
+                <Route path="/biz" element={<BizPage />} />
+                <Route path="/contacts" element={<ContactsPage />} />
+                <Route path="/resources" element={<ResourcesPage />} />
+                <Route path="/backup" element={<BackupPage />} />
+                <Route path="/chat-history/:sessionId/:messageId" element={<ChatHistoryPage />} />
+                <Route path="/chat-history-inline/:payloadId" element={<ChatHistoryPage />} />
+              </Routes>
+            </Suspense>
           </RouteGuard>
         </main>
       </div>

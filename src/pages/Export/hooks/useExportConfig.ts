@@ -63,7 +63,8 @@ export function useExportConfig(): ExportConfigResult {
           excelCompact,
           txtCols,
           concurrency,
-          fileNamingMode
+          fileNamingMode,
+          displayNamePreference
         ] = await Promise.all([
           configService.getExportPath(),
           configService.getExportWriteLayout(),
@@ -76,7 +77,8 @@ export function useExportConfig(): ExportConfigResult {
           configService.getExportDefaultExcelCompactColumns(),
           configService.getExportDefaultTxtColumns(),
           configService.getExportDefaultConcurrency(),
-          configService.getExportDefaultFileNamingMode()
+          configService.getExportDefaultFileNamingMode(),
+          configService.getExportDefaultDisplayNamePreference()
         ])
 
         if (!isMounted) return
@@ -105,6 +107,9 @@ export function useExportConfig(): ExportConfigResult {
           newOptions.exportVoices = media.voices !== false
           newOptions.exportEmojis = media.emojis !== false
           newOptions.exportFiles = media.files !== false
+          if (typeof media.maxFileSizeMb === 'number' && media.maxFileSizeMb > 0) {
+            newOptions.maxFileSizeMb = media.maxFileSizeMb
+          }
           // The old page had `exportMedia: true` derived from whether any media was checked
           newOptions.exportMedia = (
             newOptions.exportImages || 
@@ -121,6 +126,9 @@ export function useExportConfig(): ExportConfigResult {
         if (Array.isArray(txtCols)) newOptions.txtColumns = txtCols
         if (typeof concurrency === 'number' && concurrency > 0) newOptions.exportConcurrency = concurrency
         if (fileNamingMode === 'classic' || fileNamingMode === 'date-range') newOptions.fileNamingMode = fileNamingMode
+        if (displayNamePreference === 'group-nickname' || displayNamePreference === 'remark' || displayNamePreference === 'nickname') {
+          newOptions.displayNamePreference = displayNamePreference
+        }
 
         // Date range
         setRawDateRangeConfigState(dateRange)
@@ -177,7 +185,8 @@ export function useExportConfig(): ExportConfigResult {
           videos: next.exportVideos,
           voices: next.exportVoices,
           emojis: next.exportEmojis,
-          files: next.exportFiles
+          files: next.exportFiles,
+          maxFileSizeMb: next.maxFileSizeMb
         })
       }
       if (patch.exportVoiceAsText !== undefined) {
@@ -197,6 +206,9 @@ export function useExportConfig(): ExportConfigResult {
       }
       if (patch.fileNamingMode !== undefined) {
         void configService.setExportDefaultFileNamingMode(patch.fileNamingMode)
+      }
+      if (patch.displayNamePreference !== undefined) {
+        void configService.setExportDefaultDisplayNamePreference(patch.displayNamePreference)
       }
       
       // Auto-derive exportMedia

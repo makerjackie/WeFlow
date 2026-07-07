@@ -18,6 +18,7 @@ export interface ExportDefaultsSettingsPatch {
   avatars?: boolean
   dateRange?: ExportDateRangeSelection
   fileNamingMode?: configService.ExportFileNamingMode
+  displayNamePreference?: configService.ExportDisplayNamePreference
   media?: configService.ExportDefaultMediaConfig
   voiceAsText?: boolean
   excelCompactColumns?: boolean
@@ -51,6 +52,12 @@ const exportExcelColumnOptions = [
 const exportFileNamingModeOptions: Array<{ value: configService.ExportFileNamingMode; label: string; desc: string }> = [
   { value: 'classic', label: '简洁模式', desc: '示例：私聊_张三（兼容旧版）' },
   { value: 'date-range', label: '时间范围模式', desc: '示例：私聊_张三_20250101-20250331（推荐）' }
+]
+
+const exportDisplayNameOptions: Array<{ value: configService.ExportDisplayNamePreference; label: string; desc: string }> = [
+  { value: 'group-nickname', label: '群昵称优先', desc: '群聊显示群昵称，缺失时回退备注/用户名' },
+  { value: 'remark', label: '备注优先', desc: '有备注显示备注，否则显示用户名' },
+  { value: 'nickname', label: '用户名优先', desc: '有用户名显示用户名，否则显示备注' }
 ]
 
 const exportConcurrencyOptions = [1, 2, 3, 4, 5, 6] as const
@@ -120,12 +127,14 @@ export function ExportDefaultsSettingsForm({
   const [exportDefaultAvatars, setExportDefaultAvatars] = useState(true)
   const [exportDefaultDateRange, setExportDefaultDateRange] = useState<ExportDateRangeSelection>(() => createDefaultExportDateRangeSelection())
   const [exportDefaultFileNamingMode, setExportDefaultFileNamingMode] = useState<configService.ExportFileNamingMode>('classic')
+  const [exportDefaultDisplayNamePreference, setExportDefaultDisplayNamePreference] = useState<configService.ExportDisplayNamePreference>('remark')
   const [exportDefaultMedia, setExportDefaultMedia] = useState<configService.ExportDefaultMediaConfig>({
     images: true,
     videos: true,
     voices: true,
     emojis: true,
-    files: true
+    files: true,
+    maxFileSizeMb: 200
   })
   const [exportDefaultVoiceAsText, setExportDefaultVoiceAsText] = useState(false)
   const [exportDefaultExcelCompactColumns, setExportDefaultExcelCompactColumns] = useState(true)
@@ -134,11 +143,22 @@ export function ExportDefaultsSettingsForm({
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      const [savedFormat, savedAvatars, savedDateRange, savedFileNamingMode, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedConcurrency] = await Promise.all([
+      const [
+        savedFormat,
+        savedAvatars,
+        savedDateRange,
+        savedFileNamingMode,
+        savedDisplayNamePreference,
+        savedMedia,
+        savedVoiceAsText,
+        savedExcelCompactColumns,
+        savedConcurrency
+      ] = await Promise.all([
         configService.getExportDefaultFormat(),
         configService.getExportDefaultAvatars(),
         configService.getExportDefaultDateRange(),
         configService.getExportDefaultFileNamingMode(),
+        configService.getExportDefaultDisplayNamePreference(),
         configService.getExportDefaultMedia(),
         configService.getExportDefaultVoiceAsText(),
         configService.getExportDefaultExcelCompactColumns(),
@@ -151,12 +171,14 @@ export function ExportDefaultsSettingsForm({
       setExportDefaultAvatars(savedAvatars ?? true)
       setExportDefaultDateRange(resolveExportDateRangeConfig(savedDateRange))
       setExportDefaultFileNamingMode(savedFileNamingMode ?? 'classic')
+      setExportDefaultDisplayNamePreference(savedDisplayNamePreference ?? 'remark')
       setExportDefaultMedia(savedMedia ?? {
         images: true,
         videos: true,
         voices: true,
         emojis: true,
-        files: true
+        files: true,
+        maxFileSizeMb: 200
       })
       setExportDefaultVoiceAsText(savedVoiceAsText ?? false)
       setExportDefaultExcelCompactColumns(savedExcelCompactColumns ?? true)
@@ -439,6 +461,35 @@ export function ExportDefaultsSettingsForm({
         </div>
       </div>
 
+      <div className="form-group display-name-setting-group">
+        <div className="form-copy">
+          <label>消息发送者命名方式</label>
+          <span className="form-hint">控制群消息导出时发送者名称的优先级</span>
+        </div>
+        <div className="form-control">
+          <div className="display-name-inline-options" role="radiogroup" aria-label="消息发送者命名方式">
+            {exportDisplayNameOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`display-name-option ${exportDefaultDisplayNamePreference === option.value ? 'active' : ''}`}
+                aria-pressed={exportDefaultDisplayNamePreference === option.value}
+                title={option.desc}
+                onClick={async () => {
+                  setExportDefaultDisplayNamePreference(option.value)
+                  await configService.setExportDefaultDisplayNamePreference(option.value)
+                  onDefaultsChanged?.({ displayNamePreference: option.value })
+                  notify('已更新消息发送者命名方式', true)
+                }}
+              >
+                <span className="display-name-option-label">{option.label}</span>
+                <span className="display-name-option-desc">{option.desc}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
       <div className="form-group">
         <div className="form-copy">
           <label>Excel 列显示</label>
@@ -547,6 +598,24 @@ export function ExportDefaultsSettingsForm({
               <span className="media-default-check" aria-hidden="true" />
               <span>文件</span>
             </label>
+          </div>
+          <div className="media-size-limit-control">
+            <span>视频/文件最大体积</span>
+            <input
+              type="number"
+              min={1}
+              max={4096}
+              value={exportDefaultMedia.maxFileSizeMb}
+              onChange={async (e) => {
+                const maxFileSizeMb = Math.max(1, Math.min(4096, Math.floor(Number(e.target.value) || 1)))
+                const next = { ...exportDefaultMedia, maxFileSizeMb }
+                setExportDefaultMedia(next)
+                await configService.setExportDefaultMedia(next)
+                onDefaultsChanged?.({ media: next })
+                notify(`已将最大文件限制设为 ${maxFileSizeMb} MB`, true)
+              }}
+            />
+            <span>MB</span>
           </div>
         </div>
       </div>

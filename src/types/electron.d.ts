@@ -382,6 +382,22 @@ export interface ElectronAPI {
     click: (payload: string | { sessionId?: string; channel?: string; insightRecordId?: string; targetRoute?: string }) => void
     ready: () => void
     resize: (width: number, height: number) => void
+    glassRect: (payload: {
+      card: { x: number; y: number; width: number; height: number }
+      bands: Array<{ id: number; x: number; y: number; width: number; height: number }>
+      dpr: number
+      cornerRadius: number
+      blurSigma: number
+      displacementScale: number
+      aberrationIntensity: number
+      saturation: number
+    }) => void
+    glassHide: () => void
+    onLuma: (
+      callback: (
+        bands: Record<string, { r: number; g: number; b: number; darkTail: number; lightTail: number }>
+      ) => void
+    ) => () => void
     onShow: (callback: (event: any, data: any) => void) => () => void
     onNavigateToSession: (callback: (sessionId: string) => void) => () => void
     onNavigateToRoute: (callback: (route: string) => void) => () => void
@@ -563,6 +579,7 @@ export interface ElectronAPI {
         group: number
         official: number
         former_friend: number
+        blocked?: number
       }
       error?: string
     }>
@@ -573,6 +590,7 @@ export interface ElectronAPI {
         group: number
         official: number
         former_friend: number
+        blocked?: number
       }
       error?: string
     }>
@@ -626,7 +644,7 @@ export interface ElectronAPI {
       error?: string
     }>
     getContact: (username: string) => Promise<Contact | null>
-    getContactAvatar: (username: string) => Promise<{ avatarUrl?: string; displayName?: string } | null>
+    getContactAvatar: (username: string, chatroomId?: string) => Promise<{ avatarUrl?: string; displayName?: string } | null>
     updateMessage: (sessionId: string, localId: number, createTime: number, newContent: string) => Promise<{ success: boolean; error?: string }>
     deleteMessage: (sessionId: string, localId: number, createTime: number, dbPathHint?: string) => Promise<{ success: boolean; error?: string }>
     checkAntiRevokeTriggers: (sessionIds: string[]) => Promise<{
@@ -804,7 +822,7 @@ export interface ElectronAPI {
       error?: string
     }>
     resolveVoiceCache: (sessionId: string, msgId: string) => Promise<{ success: boolean; hasCache: boolean; data?: string }>
-    getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number) => Promise<{ success: boolean; transcript?: string; error?: string }>
+    getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number) => Promise<{ success: boolean; transcript?: string; error?: string }>
     onVoiceTranscriptPartial: (callback: (payload: { sessionId?: string; msgId: string; createTime?: number; text: string }) => void) => () => void
     getMessage: (sessionId: string, localId: number) => Promise<{ success: boolean; message?: Message; error?: string }>
     getMyFootprintStats: (
@@ -900,6 +918,7 @@ export interface ElectronAPI {
   }
   biz: {
     listAccounts: (account?: string) => Promise<any[]>
+    listAccountHealth: (account?: string) => Promise<any>
     listMessages: (username: string, account?: string, limit?: number, offset?: number) => Promise<any[]>
     listPayRecords: (account?: string, limit?: number, offset?: number) => Promise<any[]>
   }
@@ -1505,7 +1524,7 @@ export interface ElectronAPI {
       success: boolean
       error?: string
     }>
-    exportContacts: (outputDir: string, options: { format: 'json' | 'csv' | 'vcf'; exportAvatars: boolean; contactTypes: { friends: boolean; groups: boolean; officials: boolean }; selectedUsernames?: string[] }) => Promise<{
+    exportContacts: (outputDir: string, options: { format: 'json' | 'csv' | 'vcf'; exportAvatars: boolean; contactTypes: { friends: boolean; groups: boolean; officials: boolean; blocked?: boolean }; selectedUsernames?: string[] }) => Promise<{
       success: boolean
       successCount?: number
       error?: string
@@ -1561,11 +1580,11 @@ export interface ElectronAPI {
       error?: string
     }>
     debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
-    proxyImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; videoPath?: string; error?: string }>
+    proxyImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; videoPath?: string; status?: number; error?: string }>
     downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; data?: any; contentType?: string; error?: string }>
     exportTimeline: (options: {
       outputDir: string
-      format: 'json' | 'html' | 'arkmejson'
+      format: 'json' | 'html' | 'arkmejson' | 'markdown'
       usernames?: string[]
       keyword?: string
       exportImages?: boolean

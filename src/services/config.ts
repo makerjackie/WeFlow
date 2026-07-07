@@ -39,6 +39,7 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns',
   EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns',
   EXPORT_DEFAULT_CONCURRENCY: 'exportDefaultConcurrency',
+  EXPORT_DEFAULT_DISPLAY_NAME_PREFERENCE: 'exportDefaultDisplayNamePreference',
   EXPORT_WRITE_LAYOUT: 'exportWriteLayout',
   EXPORT_SESSION_NAME_PREFIX_ENABLED: 'exportSessionNamePrefixEnabled',
   EXPORT_LAST_SESSION_RUN_MAP: 'exportLastSessionRunMap',
@@ -158,10 +159,12 @@ export interface ExportDefaultMediaConfig {
   voices: boolean
   emojis: boolean
   files: boolean
+  maxFileSizeMb: number
 }
 
 export type ExportFileNamingMode = 'classic' | 'date-range'
 export type ExportPathStyle = 'auto' | 'posix' | 'windows'
+export type ExportDisplayNamePreference = 'group-nickname' | 'remark' | 'nickname'
 
 export type WindowCloseBehavior = 'ask' | 'tray' | 'quit'
 export type QuoteLayout = 'quote-top' | 'quote-bottom'
@@ -172,7 +175,8 @@ const DEFAULT_EXPORT_MEDIA_CONFIG: ExportDefaultMediaConfig = {
   videos: true,
   voices: true,
   emojis: true,
-  files: true
+  files: true,
+  maxFileSizeMb: 200
 }
 
 // 获取解密密钥
@@ -544,17 +548,22 @@ export async function getExportDefaultMedia(): Promise<ExportDefaultMediaConfig 
       videos: value,
       voices: value,
       emojis: value,
-      files: value
+      files: value,
+      maxFileSizeMb: DEFAULT_EXPORT_MEDIA_CONFIG.maxFileSizeMb
     }
   }
   if (value && typeof value === 'object') {
     const raw = value as Partial<Record<keyof ExportDefaultMediaConfig, unknown>>
+    const rawMaxFileSizeMb = Number(raw.maxFileSizeMb)
     return {
       images: typeof raw.images === 'boolean' ? raw.images : DEFAULT_EXPORT_MEDIA_CONFIG.images,
       videos: typeof raw.videos === 'boolean' ? raw.videos : DEFAULT_EXPORT_MEDIA_CONFIG.videos,
       voices: typeof raw.voices === 'boolean' ? raw.voices : DEFAULT_EXPORT_MEDIA_CONFIG.voices,
       emojis: typeof raw.emojis === 'boolean' ? raw.emojis : DEFAULT_EXPORT_MEDIA_CONFIG.emojis,
-      files: typeof raw.files === 'boolean' ? raw.files : DEFAULT_EXPORT_MEDIA_CONFIG.files
+      files: typeof raw.files === 'boolean' ? raw.files : DEFAULT_EXPORT_MEDIA_CONFIG.files,
+      maxFileSizeMb: Number.isFinite(rawMaxFileSizeMb) && rawMaxFileSizeMb > 0
+        ? Math.max(1, Math.min(4096, Math.floor(rawMaxFileSizeMb)))
+        : DEFAULT_EXPORT_MEDIA_CONFIG.maxFileSizeMb
     }
   }
   return null
@@ -567,7 +576,10 @@ export async function setExportDefaultMedia(media: ExportDefaultMediaConfig): Pr
     videos: media.videos,
     voices: media.voices,
     emojis: media.emojis,
-    files: media.files
+    files: media.files,
+    maxFileSizeMb: Number.isFinite(media.maxFileSizeMb)
+      ? Math.max(1, Math.min(4096, Math.floor(media.maxFileSizeMb)))
+      : DEFAULT_EXPORT_MEDIA_CONFIG.maxFileSizeMb
   })
 }
 
@@ -628,6 +640,18 @@ export async function getExportDefaultConcurrency(): Promise<number | null> {
 // 设置导出默认并发数
 export async function setExportDefaultConcurrency(concurrency: number): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY, concurrency)
+}
+
+// 获取导出默认命名方式
+export async function getExportDefaultDisplayNamePreference(): Promise<ExportDisplayNamePreference | null> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_DISPLAY_NAME_PREFERENCE)
+  if (value === 'group-nickname' || value === 'remark' || value === 'nickname') return value
+  return null
+}
+
+// 设置导出默认命名方式
+export async function setExportDefaultDisplayNamePreference(preference: ExportDisplayNamePreference): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_DISPLAY_NAME_PREFERENCE, preference)
 }
 
 export type ExportWriteLayout = 'A' | 'B' | 'C'
@@ -1002,9 +1026,12 @@ export interface ContactsListCacheContact {
   nickname?: string
   alias?: string
   labels?: string[]
+  description?: string
   detailDescription?: string
   region?: string
-  type: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
+  type: 'friend' | 'group' | 'official' | 'former_friend' | 'blocked' | 'other'
+  officialAccountKind?: 'subscription' | 'service' | 'enterprise' | 'unknown'
+  officialAccountType?: number
 }
 
 export interface ContactsListCacheItem {
@@ -1528,11 +1555,16 @@ export async function getContactsListCache(scopeKey: string): Promise<ContactsLi
       labels: Array.isArray(item.labels)
         ? Array.from(new Set(item.labels.map((label) => String(label || '').trim()).filter(Boolean)))
         : undefined,
+      description: typeof item.description === 'string' ? (item.description.trim() || undefined) : undefined,
       detailDescription: typeof item.detailDescription === 'string' ? (item.detailDescription.trim() || undefined) : undefined,
       region: typeof item.region === 'string' ? (item.region.trim() || undefined) : undefined,
-      type: (type === 'friend' || type === 'group' || type === 'official' || type === 'former_friend' || type === 'other')
+      type: (type === 'friend' || type === 'group' || type === 'official' || type === 'former_friend' || type === 'blocked' || type === 'other')
         ? type
-        : 'other'
+        : 'other',
+      officialAccountKind: item.officialAccountKind === 'subscription' || item.officialAccountKind === 'service' || item.officialAccountKind === 'enterprise' || item.officialAccountKind === 'unknown'
+        ? item.officialAccountKind
+        : undefined,
+      officialAccountType: Number.isFinite(Number(item.officialAccountType)) ? Math.floor(Number(item.officialAccountType)) : undefined
     })
   }
 
@@ -1555,7 +1587,7 @@ export async function setContactsListCache(scopeKey: string, contacts: ContactsL
     if (!username) continue
     const displayName = String(contact?.displayName || username)
     const type = contact?.type || 'other'
-    if (type !== 'friend' && type !== 'group' && type !== 'official' && type !== 'former_friend' && type !== 'other') {
+    if (type !== 'friend' && type !== 'group' && type !== 'official' && type !== 'former_friend' && type !== 'blocked' && type !== 'other') {
       continue
     }
     normalized.push({
@@ -1567,9 +1599,14 @@ export async function setContactsListCache(scopeKey: string, contacts: ContactsL
       labels: Array.isArray(contact?.labels)
         ? Array.from(new Set(contact.labels.map((label) => String(label || '').trim()).filter(Boolean)))
         : undefined,
+      description: contact?.description ? (String(contact.description).trim() || undefined) : undefined,
       detailDescription: contact?.detailDescription ? (String(contact.detailDescription).trim() || undefined) : undefined,
       region: contact?.region ? (String(contact.region).trim() || undefined) : undefined,
-      type
+      type,
+      officialAccountKind: contact?.officialAccountKind === 'subscription' || contact?.officialAccountKind === 'service' || contact?.officialAccountKind === 'enterprise' || contact?.officialAccountKind === 'unknown'
+        ? contact.officialAccountKind
+        : undefined,
+      officialAccountType: Number.isFinite(Number(contact?.officialAccountType)) ? Math.floor(Number(contact.officialAccountType)) : undefined
     })
   }
 

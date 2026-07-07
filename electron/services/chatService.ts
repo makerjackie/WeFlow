@@ -166,11 +166,19 @@ export interface ContactInfo {
   nickname?: string
   alias?: string
   labels?: string[]
+  description?: string
   detailDescription?: string
   region?: string
   avatarUrl?: string
-  type: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
+  type: 'friend' | 'group' | 'official' | 'former_friend' | 'blocked' | 'other'
+  officialAccountKind?: 'subscription' | 'service' | 'enterprise' | 'unknown'
+  officialAccountType?: number
 }
+
+const BUILTIN_OFFICIAL_HELPER_USERNAMES = new Set([
+  'gh_f0a92aa7146c' // 微信收款助手不出现在通讯录的公众号/服务号分组里
+])
+const CONTACT_CLASSIFICATION_CACHE_VERSION = 'contact-classification-v5'
 
 interface GetContactsOptions {
   lite?: boolean
@@ -219,6 +227,7 @@ interface ExportTabCounts {
   group: number
   official: number
   former_friend: number
+  blocked?: number
 }
 
 interface SessionDetailFast {
@@ -358,6 +367,8 @@ class ChatService {
   private readonly messageCursorSessionLimit = 8
   private avatarCache: Map<string, ContactCacheEntry>
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
+  private groupNicknameCache = new Map<string, { nicknames: Map<string, string>; updatedAt: number }>()
+  private readonly groupNicknameCacheTtlMs = 3 * 60 * 1000
   private readonly defaultV1AesKey = 'cfcd208495d565ef'
   private readonly contactCacheService: ContactCacheService
   private readonly messageCacheService: MessageCacheService
@@ -373,7 +384,8 @@ class ChatService {
   private mediaDbsCache: string[] | null = null
   private mediaDbsCacheTime = 0
   private readonly mediaDbsCacheTtl = 300000 // 5分钟
-  private readonly voiceWavCacheMaxEntries = 50
+  // WAV 解码产物每条可达 ~2MB，50 条上限最坏 100MB；12 条足够覆盖连续回放场景
+  private readonly voiceWavCacheMaxEntries = 12
   // 缓存 media.db 的表结构信息
   private mediaDbSchemaCache = new Map<string, {
     voiceTable: string
@@ -438,6 +450,7 @@ class ChatService {
   private readonly visibilityAnomalyLogBurst = 3
   private visibilityAnomalyLogState = new Map<string, { windowStart: number; total: number; suppressed: number }>()
   private readonly contactLabelNameMapCacheTtlMs = 10 * 60 * 1000
+  private connectInFlight: Promise<{ success: boolean; error?: string }> | null = null
   private contactsLoadInFlight: { mode: 'lite' | 'full'; promise: Promise<{ success: boolean; contacts?: ContactInfo[]; error?: string }> } | null = null
   private contactsMemoryCache = new Map<'lite' | 'full', { scope: string; updatedAt: number; contacts: ContactInfo[] }>()
   private readonly contactsMemoryCacheTtlMs = 3 * 60 * 1000
@@ -550,9 +563,27 @@ class ChatService {
   }
 
   /**
-   * 连接数据库
+   * 连接数据库（并发调用共享同一次连接过程，避免重复 open）
    */
   async connect(): Promise<{ success: boolean; error?: string }> {
+    if (this.connected && wcdbService.isReady()) {
+      return { success: true }
+    }
+    if (this.connectInFlight) {
+      return this.connectInFlight
+    }
+    const promise = this.connectInternal()
+    this.connectInFlight = promise
+    try {
+      return await promise
+    } finally {
+      if (this.connectInFlight === promise) {
+        this.connectInFlight = null
+      }
+    }
+  }
+
+  private async connectInternal(): Promise<{ success: boolean; error?: string }> {
     try {
       const wxid = String(this.runtimeConfig?.myWxid || this.configService.get('myWxid') || '').trim()
       const dbPath = String(this.runtimeConfig?.dbPath || this.configService.get('dbPath') || '').trim()
@@ -1055,8 +1086,9 @@ class ChatService {
       for (const row of contactResult.contacts as Record<string, any>[]) {
         const username = String(row.username || '').trim()
         if (!username || !this.isAntiRevokeContactRow(username, row)) continue
+        const displayName = String(row.remark || row.nick_name || row.nickName || row.alias || username)
         map.set(username, {
-          displayName: String(row.remark || row.nick_name || row.nickName || row.alias || username).trim()
+          displayName: displayName.trim() || displayName
         })
       }
     } catch {
@@ -1676,7 +1708,8 @@ class ChatService {
         private: Number(result.counts.private || 0),
         group: Number(result.counts.group || 0),
         official: Number(result.counts.official || 0),
-        former_friend: Number(result.counts.former_friend || 0)
+        former_friend: Number(result.counts.former_friend || 0),
+        blocked: Number(result.counts.blocked || 0)
       }
 
       return { success: true, counts }
@@ -2052,7 +2085,7 @@ class ChatService {
   private getContactsCacheScope(): string {
     const dbPath = String(this.configService.get('dbPath') || '').trim()
     const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
-    return `${dbPath}::${myWxid}`
+    return `${dbPath}::${myWxid}::${CONTACT_CLASSIFICATION_CACHE_VERSION}`
   }
 
   private cloneContacts(contacts: ContactInfo[]): ContactInfo[] {
@@ -2142,6 +2175,7 @@ class ChatService {
       const transformStartedAt = Date.now()
       const contacts: (ContactInfo & { lastContactTime: number })[] = []
       let contactLabelNameMap = new Map<number, string>()
+      const officialAccountTypeMap = await this.getOfficialAccountTypeMap()
       if (!isLiteMode) {
         const labelMapStartedAt = Date.now()
         contactLabelNameMap = await this.getContactLabelNameMap()
@@ -2152,11 +2186,18 @@ class ChatService {
 
         if (!username) continue
 
-        let type: 'friend' | 'group' | 'official' | 'former_friend' | 'other' = 'other'
+        let type: 'friend' | 'group' | 'official' | 'former_friend' | 'blocked' | 'other' = 'other'
         const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], 0)
+        const flag = this.getRowInt(row, ['flag', 'contact_flag', 'contactFlag', 'WCDB_CT_flag'], 0)
         const quanPin = String(this.getRowField(row, ['quan_pin', 'quanPin', 'WCDB_CT_quan_pin']) || '').trim()
+        const alias = String(this.getRowField(row, ['alias', 'WCDB_CT_alias']) || '').trim()
+        const remark = String(this.getRowField(row, ['remark', 'WCDB_CT_remark']) || '').trim()
         const loweredUsername = username.toLowerCase()
         const isOpenimEnterprise = this.isEnterpriseOpenimUsername(username)
+        const isFormerFriendResidual = !username.startsWith('gh_') && (
+          (localType === 0 && quanPin) ||
+          (localType === 3 && flag !== 4 && (quanPin || alias || remark))
+        )
         if (isOpenimEnterprise && !this.isAllowedEnterpriseOpenimByLocalType(username, localType)) {
           continue
         }
@@ -2164,24 +2205,28 @@ class ChatService {
 
         if (username.endsWith('@chatroom')) {
           type = 'group'
-        } else if (username.startsWith('gh_')) {
+        } else if (username.startsWith('gh_') && localType === 1 && !BUILTIN_OFFICIAL_HELPER_USERNAMES.has(username)) {
           type = 'official'
+        } else if (!username.startsWith('gh_') && (flag & 8) === 8) {
+          type = 'blocked'
+        } else if (isFormerFriendResidual) {
+          type = 'former_friend'
         } else if (isOpenimEnterprise) {
           type = 'friend'
         } else if (isVisibleWeixinContact) {
           type = 'friend'
         } else if (localType === 1 && !FRIEND_EXCLUDE_USERNAMES.has(username)) {
           type = 'friend'
-        } else if (localType === 0 && quanPin) {
-          type = 'former_friend'
         } else {
           continue
         }
 
         const displayName = row.remark || row.nick_name || row.alias || username
         const labels = isLiteMode ? [] : this.parseContactLabels(row, contactLabelNameMap)
+        const description = isLiteMode ? '' : this.getContactDescription(row)
         const detailDescription = isLiteMode ? '' : this.getContactSignature(row)
         const region = isLiteMode ? '' : this.getContactRegion(row)
+        const officialAccountType = type === 'official' ? officialAccountTypeMap.get(username) : undefined
 
         contacts.push({
           username,
@@ -2190,10 +2235,13 @@ class ChatService {
           nickname: row.nick_name || undefined,
           alias: row.alias || undefined,
           labels: labels.length > 0 ? labels : undefined,
+          description: description || undefined,
           detailDescription: detailDescription || undefined,
           region: region || undefined,
           avatarUrl: undefined,
           type,
+          officialAccountType,
+          officialAccountKind: type === 'official' ? this.getOfficialAccountKind(officialAccountType) : undefined,
           lastContactTime: lastContactTimeMap.get(username) || 0
         })
       }
@@ -2569,6 +2617,7 @@ class ChatService {
     if (normalized.length > 0) {
       await this.repairEmojiMessages(normalized)
       await this.resolveQuotedMessages(normalized, sessionId)
+      await this.enrichGroupMessageSenderProfiles(normalized, sessionId)
     }
 
     return {
@@ -2654,6 +2703,7 @@ class ChatService {
     if (normalized.length > 0) {
       await this.repairEmojiMessages(normalized)
       await this.resolveQuotedMessages(normalized, sessionId)
+      await this.enrichGroupMessageSenderProfiles(normalized, sessionId)
     }
 
     return {
@@ -2821,6 +2871,7 @@ class ChatService {
       if (fixPromises.length > 0) {
         await Promise.allSettled(fixPromises)
       }
+      await this.enrichGroupMessageSenderProfiles(normalized, sessionId)
 
       return { success: true, messages: normalized }
     } catch (e) {
@@ -2888,6 +2939,7 @@ class ChatService {
 
     if (collected.length > 0) {
       await this.repairEmojiMessages(collected)
+      await this.enrichGroupMessageSenderProfiles(collected, sessionId)
     }
     return { success: true, messages: collected }
   }
@@ -3154,6 +3206,7 @@ class ChatService {
     if (normalized.length > 0) {
       await this.repairEmojiMessages(normalized)
       await this.resolveQuotedMessages(normalized, sessionId)
+      await this.enrichGroupMessageSenderProfiles(normalized, sessionId)
     }
     return {
       success: true,
@@ -3162,6 +3215,41 @@ class ChatService {
       rawRowsConsumed,
       filteredOut,
       bufferedRows: queuedRows.length > 0 ? queuedRows : undefined
+    }
+  }
+
+  private async enrichGroupMessageSenderProfiles(messages: Message[], sessionId: string): Promise<void> {
+    const normalizedSessionId = String(sessionId || '').trim()
+    if (!normalizedSessionId.endsWith('@chatroom') || messages.length === 0) return
+
+    const senderUsernames = Array.from(new Set(
+      messages
+        .map((message) => String(message.senderUsername || '').trim())
+        .filter(Boolean)
+    ))
+    if (senderUsernames.length === 0) return
+
+    try {
+      const [groupNicknames, contactsResult] = await Promise.all([
+        this.getGroupNicknamesForRoom(normalizedSessionId),
+        this.enrichSessionsContactInfo(senderUsernames)
+      ])
+      const contacts = contactsResult.success && contactsResult.contacts ? contactsResult.contacts : {}
+
+      for (const message of messages) {
+        const sender = String(message.senderUsername || '').trim()
+        if (!sender) continue
+
+        const groupNickname = this.resolveGroupNicknameByCandidates(
+          groupNicknames,
+          this.buildSenderGroupNicknameCandidates(sender)
+        )
+        const contact = contacts[sender]
+        message.senderDisplayName = groupNickname || contact?.displayName || message.senderDisplayName || sender
+        message.senderAvatarUrl = contact?.avatarUrl || message.senderAvatarUrl
+      }
+    } catch (error) {
+      console.warn('[ChatService] 补充群消息发送者资料失败:', error)
     }
   }
 
@@ -3420,6 +3508,45 @@ class ChatService {
     return new Map(labelMap)
   }
 
+  private async getOfficialAccountTypeMap(): Promise<Map<string, number>> {
+    const typeMap = new Map<string, number>()
+    try {
+      const tableResult = await wcdbService.execQuery(
+        'contact',
+        null,
+        "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)='biz_info' LIMIT 1"
+      )
+      const tableName = tableResult.success && Array.isArray(tableResult.rows)
+        ? String((tableResult.rows[0] as Record<string, any> | undefined)?.name || '').trim()
+        : ''
+      if (!tableName) return typeMap
+
+      const result = await wcdbService.execQuery(
+        'contact',
+        null,
+        `SELECT username, type FROM ${this.quoteSqlIdentifier(tableName)}`
+      )
+      if (!result.success || !Array.isArray(result.rows)) return typeMap
+
+      for (const row of result.rows as Array<Record<string, any>>) {
+        const username = String(this.getRowField(row, ['username', 'user_name', 'userName']) || '').trim()
+        if (!username) continue
+        const type = this.getRowInt(row, ['type', 'biz_type', 'bizType'], -1)
+        if (type >= 0) typeMap.set(username, type)
+      }
+    } catch (error) {
+      console.warn('读取 biz_info 公众号类型失败:', error)
+    }
+    return typeMap
+  }
+
+  private getOfficialAccountKind(type: number | undefined): 'subscription' | 'service' | 'enterprise' | 'unknown' {
+    if (type === 0) return 'subscription'
+    if (type === 1) return 'service'
+    if (type === 2 || type === 3) return 'enterprise'
+    return 'unknown'
+  }
+
   private toExtraBufferBytes(row: Record<string, any>): Buffer | null {
     const raw = this.getRowField(row, ['extra_buffer', 'extraBuffer'])
     if (raw === undefined || raw === null) return null
@@ -3568,6 +3695,22 @@ class ChatService {
     return []
   }
 
+  private getContactDescription(row: Record<string, any>): string {
+    const normalize = (raw: unknown): string => {
+      const text = String(raw || '').replace(/\u0000/g, '').trim()
+      if (!text) return ''
+      const lower = text.toLowerCase()
+      if (lower === '-' || lower === '--' || lower === '—' || lower === 'null' || lower === 'undefined' || lower === 'none') {
+        return ''
+      }
+      return text
+    }
+
+    return normalize(this.getRowField(row, [
+      'description', 'desc', 'contact_description', 'contactDescription', 'detail_description', 'detailDescription'
+    ]))
+  }
+
   private getContactSignature(row: Record<string, any>): string {
     const normalize = (raw: unknown): string => {
       const text = String(raw || '').replace(/\u0000/g, '').trim()
@@ -3579,23 +3722,26 @@ class ChatService {
       return text
     }
 
+    // contact.description/detail_description 是微信联系人“描述/备忘”类字段，不是个性签名。
+    // 真正的个性签名优先来自 native 解析出的 signature，或 extra_buffer field 4。
     const value = this.getRowField(row, [
-      'signature', 'sign', 'personal_signature', 'personalSignature', 'profile', 'introduction',
-      'detail_description', 'detailDescription', 'description', 'desc', 'contact_description', 'contactDescription'
+      'signature', 'sign', 'personal_signature', 'personalSignature'
     ])
     const direct = normalize(value)
     if (direct) return direct
+
+    const signatures = this.extractExtraBufferTopLevelFieldStrings(row, 4)
+    for (const signature of signatures) {
+      const text = normalize(signature)
+      if (!text) continue
+      return text
+    }
 
     for (const [key, rawValue] of Object.entries(row)) {
       const normalizedKey = key.toLowerCase()
       const isCandidate =
         normalizedKey.includes('sign') ||
-        normalizedKey.includes('signature') ||
-        normalizedKey.includes('profile') ||
-        normalizedKey.includes('intro') ||
-        normalizedKey.includes('description') ||
-        normalizedKey.includes('detail') ||
-        normalizedKey.includes('desc')
+        normalizedKey.includes('signature')
       if (!isCandidate) continue
       if (
         normalizedKey.includes('avatar') ||
@@ -3606,14 +3752,6 @@ class ChatService {
       ) continue
       const text = normalize(rawValue)
       if (text) return text
-    }
-
-    // contact.extra_buffer field 4: 个性签名兜底
-    const signatures = this.extractExtraBufferTopLevelFieldStrings(row, 4)
-    for (const signature of signatures) {
-      const text = normalize(signature)
-      if (!text) continue
-      return text
     }
 
     return ''
@@ -3956,6 +4094,114 @@ class ChatService {
       return [cleaned, lowerRaw]
     }
     return [lowerRaw]
+  }
+
+  private getGroupNicknameCacheKey(chatroomId: string): string {
+    const dbPath = String(this.configService.get('dbPath') || '').trim()
+    const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
+    return `${dbPath}::${myWxid}::${String(chatroomId || '').trim()}`
+  }
+
+  private normalizeGroupNickname(value: unknown): string {
+    const trimmed = String(value || '').trim()
+    if (!trimmed) return ''
+    const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '').trim()
+    if (!cleaned) return ''
+    if (/^[,"'“”‘’，、]+$/.test(cleaned)) return ''
+    return cleaned
+  }
+
+  private normalizeGroupNicknameIdentity(value: unknown): string {
+    return String(value || '').trim().toLowerCase()
+  }
+
+  private buildGroupNicknameIdCandidates(values: Array<unknown>): string[] {
+    const candidates = new Set<string>()
+    for (const rawValue of values) {
+      const raw = String(rawValue || '').trim()
+      if (!raw) continue
+      candidates.add(raw)
+      for (const identityKey of this.buildIdentityKeys(raw)) {
+        if (identityKey) candidates.add(identityKey)
+      }
+    }
+    return Array.from(candidates)
+  }
+
+  private buildTrustedGroupNicknameMap(entries: Iterable<[string, string]>): Map<string, string> {
+    const buckets = new Map<string, Set<string>>()
+    for (const [memberIdRaw, nicknameRaw] of entries) {
+      const identity = this.normalizeGroupNicknameIdentity(memberIdRaw)
+      if (!identity) continue
+      const nickname = this.normalizeGroupNickname(nicknameRaw)
+      if (!nickname) continue
+      const bucket = buckets.get(identity)
+      if (bucket) {
+        bucket.add(nickname)
+      } else {
+        buckets.set(identity, new Set([nickname]))
+      }
+    }
+
+    const trusted = new Map<string, string>()
+    for (const [identity, nicknameSet] of buckets.entries()) {
+      if (nicknameSet.size === 1) {
+        trusted.set(identity, Array.from(nicknameSet)[0])
+      }
+    }
+    return trusted
+  }
+
+  private async getGroupNicknamesForRoom(chatroomId: string): Promise<Map<string, string>> {
+    const normalizedChatroomId = String(chatroomId || '').trim()
+    if (!normalizedChatroomId.endsWith('@chatroom')) return new Map<string, string>()
+
+    const cacheKey = this.getGroupNicknameCacheKey(normalizedChatroomId)
+    const cached = this.groupNicknameCache.get(cacheKey)
+    if (cached && Date.now() - cached.updatedAt <= this.groupNicknameCacheTtlMs) {
+      return cached.nicknames
+    }
+
+    try {
+      const result = await wcdbService.getGroupNicknames(normalizedChatroomId)
+      const nicknames = result.success && result.nicknames
+        ? this.buildTrustedGroupNicknameMap(Object.entries(result.nicknames))
+        : new Map<string, string>()
+      this.groupNicknameCache.set(cacheKey, { nicknames, updatedAt: Date.now() })
+      return nicknames
+    } catch (error) {
+      console.warn('[ChatService] 获取群成员群名片失败:', error)
+      return new Map<string, string>()
+    }
+  }
+
+  private resolveGroupNicknameByCandidates(groupNicknames: Map<string, string>, candidates: Array<unknown>): string {
+    let resolved = ''
+    for (const candidate of this.buildGroupNicknameIdCandidates(candidates)) {
+      const normalizedId = this.normalizeGroupNicknameIdentity(candidate)
+      if (!normalizedId) continue
+      const nickname = this.normalizeGroupNickname(groupNicknames.get(normalizedId) || '')
+      if (!nickname) continue
+      if (!resolved) {
+        resolved = nickname
+        continue
+      }
+      if (resolved !== nickname) return ''
+    }
+    return resolved
+  }
+
+  private buildSenderGroupNicknameCandidates(username: string): string[] {
+    const normalizedUsername = String(username || '').trim()
+    const candidates: unknown[] = [normalizedUsername, this.cleanAccountDirName(normalizedUsername)]
+    const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
+    if (myWxid) {
+      const myIdentityKeys = new Set(this.buildIdentityKeys(myWxid))
+      if (this.buildIdentityKeys(normalizedUsername).some((key) => myIdentityKeys.has(key))) {
+        candidates.push(myWxid, this.cleanAccountDirName(myWxid))
+      }
+    }
+    return this.buildGroupNicknameIdCandidates(candidates)
   }
 
   private resolveMessageIsSend(rawIsSend: number | null, senderUsername?: string | null): {
@@ -7582,45 +7828,56 @@ class ChatService {
   /**
    * 获取联系人头像和显示名称（用于群聊消息）
    */
-  async getContactAvatar(username: string): Promise<{ avatarUrl?: string; displayName?: string } | null> {
-    if (!username) return null
+  async getContactAvatar(username: string, chatroomId?: string): Promise<{ avatarUrl?: string; displayName?: string } | null> {
+    const normalizedUsername = String(username || '').trim()
+    const normalizedChatroomId = String(chatroomId || '').trim()
+    if (!normalizedUsername) return null
 
     try {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return null
-      const cached = this.avatarCache.get(username)
+
+      const groupNicknames = normalizedChatroomId.endsWith('@chatroom')
+        ? await this.getGroupNicknamesForRoom(normalizedChatroomId)
+        : new Map<string, string>()
+      const groupDisplayName = this.resolveGroupNicknameByCandidates(
+        groupNicknames,
+        this.buildSenderGroupNicknameCandidates(normalizedUsername)
+      )
+
+      const cached = this.avatarCache.get(normalizedUsername)
       // 检查缓存是否有效，且头像不是错误的 hex 格式
       const cachedAvatarUrl = this.shouldPersistAvatarUrl(cached?.avatarUrl) ? cached?.avatarUrl : undefined
       if (cached && cachedAvatarUrl && Date.now() - cached.updatedAt < this.avatarCacheTtlMs) {
-        return { avatarUrl: cachedAvatarUrl, displayName: cached.displayName }
+        return { avatarUrl: cachedAvatarUrl, displayName: groupDisplayName || cached.displayName }
       }
 
-      const contact = await this.getContact(username)
-      const avatarResult = await wcdbService.getAvatarUrls([username])
-      let avatarUrl = avatarResult.success && avatarResult.map ? avatarResult.map[username] : undefined
+      const contact = await this.getContact(normalizedUsername)
+      const avatarResult = await wcdbService.getAvatarUrls([normalizedUsername])
+      let avatarUrl = avatarResult.success && avatarResult.map ? avatarResult.map[normalizedUsername] : undefined
       if (!this.isValidAvatarUrl(avatarUrl)) {
         avatarUrl = undefined
       }
       if (!avatarUrl) {
-        const headImageAvatars = await this.getAvatarsFromHeadImageDb([username])
-        const fallbackAvatarUrl = headImageAvatars[username]
+        const headImageAvatars = await this.getAvatarsFromHeadImageDb([normalizedUsername])
+        const fallbackAvatarUrl = headImageAvatars[normalizedUsername]
         if (this.isValidAvatarUrl(fallbackAvatarUrl)) {
           avatarUrl = fallbackAvatarUrl
         }
       }
-      const displayName = contact?.remark || contact?.nickName || contact?.alias || cached?.displayName || username
+      const effectiveAvatarUrl = this.shouldPersistAvatarUrl(avatarUrl)
+        ? avatarUrl
+        : cachedAvatarUrl
+      const contactDisplayName = contact?.remark || contact?.nickName || contact?.alias || cached?.displayName || normalizedUsername
+      const displayName = groupDisplayName || contactDisplayName
       const cacheEntry: ContactCacheEntry = {
-        avatarUrl: this.shouldPersistAvatarUrl(avatarUrl)
-          ? avatarUrl
-          : this.shouldPersistAvatarUrl(cached?.avatarUrl)
-            ? cached?.avatarUrl
-            : undefined,
-        displayName,
+        avatarUrl: effectiveAvatarUrl,
+        displayName: contactDisplayName,
         updatedAt: Date.now()
       }
-      this.avatarCache.set(username, cacheEntry)
-      this.contactCacheService.setEntries({ [username]: cacheEntry })
-      return { avatarUrl, displayName }
+      this.avatarCache.set(normalizedUsername, cacheEntry)
+      this.contactCacheService.setEntries({ [normalizedUsername]: cacheEntry })
+      return { avatarUrl: effectiveAvatarUrl, displayName }
     } catch {
       return null
     }
@@ -7649,7 +7906,8 @@ class ChatService {
           const nicknameBuckets = new Map<string, Set<string>>()
           for (const [memberIdRaw, nicknameRaw] of Object.entries(nickResult.nicknames)) {
             const memberId = String(memberIdRaw || '').trim().toLowerCase()
-            const nickname = String(nicknameRaw || '').trim()
+            const rawNickname = typeof nicknameRaw === 'string' ? nicknameRaw : String(nicknameRaw || '')
+            const nickname = rawNickname.trim() || rawNickname
             if (!memberId || !nickname) continue
             const slot = nicknameBuckets.get(memberId)
             if (slot) {
@@ -8735,27 +8993,44 @@ class ChatService {
 
       const t3 = Date.now()
       // 从数据库读取 silk 数据
-      const silkData = await this.getVoiceDataFromMediaDb(sessionId, msgCreateTime, localId, resolvedServerId || 0, candidates, lookupPath, myWxid)
+      let silkData = await this.getVoiceDataFromMediaDb(sessionId, msgCreateTime, localId, resolvedServerId || 0, candidates, lookupPath, myWxid)
       const t4 = Date.now()
       lookupPath.push(`DB定位耗时=${t4 - t3}ms`)
 
 
       if (!silkData) {
-        logLookupPath('fail', '未找到语音数据')
-        return { success: false, error: '未找到语音数据 (请确保已在微信中播放过该语音)' }
+        lookupPath.push('native未找到语音数据，尝试media.db直查fallback')
+        const fallbackStart = Date.now()
+        silkData = await this.getVoiceDataFromMediaDbFallback(sessionId, msgCreateTime, localId, resolvedServerId || 0, candidates, lookupPath)
+        lookupPath.push(`fallback定位耗时=${Date.now() - fallbackStart}ms`)
+        if (!silkData) {
+          logLookupPath('fail', '未找到语音数据')
+          return { success: false, error: '未找到语音数据 (请确保已在微信中播放过该语音)' }
+        }
       }
       lookupPath.push('语音二进制定位完成')
 
       const t5 = Date.now()
       // 使用 silk-wasm 解码
-      const pcmData = await this.decodeSilkToPcm(silkData, 24000)
+      let pcmData = await this.decodeSilkToPcm(silkData, 24000)
       const t6 = Date.now()
       lookupPath.push(`silk解码耗时=${t6 - t5}ms`)
 
 
       if (!pcmData) {
-        logLookupPath('fail', 'Silk解码失败')
-        return { success: false, error: 'Silk 解码失败' }
+        lookupPath.push('native语音BLOB解码失败，尝试media.db直查fallback重新定位')
+        const fallbackStart = Date.now()
+        const fallbackSilkData = await this.getVoiceDataFromMediaDbFallback(sessionId, msgCreateTime, localId, resolvedServerId || 0, candidates, lookupPath)
+        lookupPath.push(`fallback重定位耗时=${Date.now() - fallbackStart}ms`)
+        if (fallbackSilkData && fallbackSilkData.length > 0) {
+          const fallbackDecodeStart = Date.now()
+          pcmData = await this.decodeSilkToPcm(fallbackSilkData, 24000)
+          lookupPath.push(`fallback silk解码耗时=${Date.now() - fallbackDecodeStart}ms`)
+        }
+        if (!pcmData) {
+          logLookupPath('fail', 'Silk解码失败')
+          return { success: false, error: 'Silk 解码失败' }
+        }
       }
       lookupPath.push('silk解码成功')
 
@@ -8894,6 +9169,260 @@ class ChatService {
     }
   }
 
+  private async listVoiceMediaDbs(): Promise<string[]> {
+    const now = Date.now()
+    if (this.mediaDbsCache && now - this.mediaDbsCacheTime <= this.mediaDbsCacheTtl) {
+      return this.mediaDbsCache
+    }
+
+    const discovered = new Set<string>()
+    try {
+      const nativeResult = await wcdbService.listMediaDbs()
+      if (nativeResult.success && Array.isArray(nativeResult.data)) {
+        for (const dbPath of nativeResult.data) {
+          const normalized = String(dbPath || '').trim()
+          if (normalized) discovered.add(normalized)
+        }
+      }
+    } catch {
+      // ignore native list failure; manual fallback below
+    }
+
+    if (discovered.size === 0) {
+      const manual = await this.findMediaDbsManually()
+      for (const dbPath of manual) {
+        const normalized = String(dbPath || '').trim()
+        if (normalized) discovered.add(normalized)
+      }
+    }
+
+    const mediaDbs = Array.from(discovered)
+    this.mediaDbsCache = mediaDbs
+    this.mediaDbsCacheTime = now
+    return mediaDbs
+  }
+
+  private getRowString(row: Record<string, any> | null | undefined, keys: string[], fallback = ''): string {
+    if (!row) return fallback
+    for (const key of keys) {
+      const value = row[key]
+      if (value === null || value === undefined) continue
+      const text = String(value).trim()
+      if (text) return text
+    }
+    return fallback
+  }
+
+  private async getVoiceSameTimeIndex(sessionId: string, createTime: number, localId: number): Promise<number> {
+    try {
+      const tables = await this.getSessionMessageTables(sessionId)
+      if (!Array.isArray(tables) || tables.length === 0) return 0
+
+      const allLocalIds: number[] = []
+      for (const table of tables) {
+        const tableName = String(table.tableName || '').trim()
+        const dbPath = String(table.dbPath || '').trim()
+        if (!tableName || !dbPath) continue
+
+        const columns = await this.getMessageTableColumns(dbPath, tableName)
+        const localIdCol = columns.has('local_id') ? 'local_id' : (columns.has('id') ? 'id' : '')
+        const createTimeCol = columns.has('create_time') ? 'create_time' : (columns.has('createtime') ? 'createtime' : '')
+        const localTypeCol = columns.has('local_type') ? 'local_type' : (columns.has('type') ? 'type' : '')
+        if (!localIdCol || !createTimeCol || !localTypeCol) continue
+
+        const sql = [
+          `SELECT ${this.quoteSqlIdentifier(localIdCol)} AS local_id`,
+          `FROM ${this.quoteSqlIdentifier(tableName)}`,
+          `WHERE ${this.quoteSqlIdentifier(createTimeCol)} = ${Math.floor(createTime)}`,
+          `AND ${this.quoteSqlIdentifier(localTypeCol)} = 34`,
+          `ORDER BY ${this.quoteSqlIdentifier(localIdCol)} ASC`
+        ].join(' ')
+        const result = await wcdbService.execQuery('message', dbPath, sql)
+        if (!result.success || !Array.isArray(result.rows)) continue
+        for (const row of result.rows) {
+          const id = this.toSafeInt((row as Record<string, any>).local_id, 0)
+          if (id > 0) allLocalIds.push(id)
+        }
+      }
+
+      const uniqueSorted = Array.from(new Set(allLocalIds)).sort((a, b) => a - b)
+      const index = uniqueSorted.indexOf(localId)
+      return index >= 0 ? index : 0
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * CipherTalk 风格兜底：绕过 native getVoiceData，直接扫 media_*.db 的 VoiceInfo/Name2Id。
+   * 主要用于 native 命中错 BLOB 或旧表结构缺少精确字段时，避免导出/转写阶段卡在 Silk 解码失败。
+   */
+  private async getVoiceDataFromMediaDbFallback(
+    sessionId: string,
+    createTime: number,
+    localId: number,
+    svrId: string | number,
+    candidates: string[],
+    lookupPath?: string[]
+  ): Promise<Buffer | null> {
+    const createTimeInt = Math.max(0, Math.floor(Number(createTime || 0)))
+    const localIdInt = Math.max(0, Math.floor(Number(localId || 0)))
+    const svrIdToken = this.normalizeUnsignedIntegerToken(svrId)
+    if (!createTimeInt) return null
+
+    const mediaDbs = await this.listVoiceMediaDbs()
+    lookupPath?.push(`fallback直查media.db: dbs=${mediaDbs.length}, createTime=${createTimeInt}, localId=${localIdInt}, svrId=${svrIdToken || '0'}`)
+    if (mediaDbs.length === 0) return null
+
+    let sameTimeIndex: number | null = null
+    const getSameTimeIndex = async (): Promise<number> => {
+      if (sameTimeIndex !== null) return sameTimeIndex
+      sameTimeIndex = await this.getVoiceSameTimeIndex(sessionId, createTimeInt, localIdInt)
+      lookupPath?.push(`fallback同秒语音索引=${sameTimeIndex}`)
+      return sameTimeIndex
+    }
+
+    const candidateList = Array.from(new Set((candidates || []).map(v => String(v || '').trim()).filter(Boolean)))
+    const queryFirstData = async (dbPath: string, sql: string): Promise<Buffer | null> => {
+      const result = await wcdbService.execQuery('media', dbPath, sql)
+      if (!result.success || !Array.isArray(result.rows) || result.rows.length === 0) return null
+      const row = result.rows[0] as Record<string, any>
+      return this.decodeVoiceBlob(row.data ?? row.voice_data ?? row.buf ?? row.voicebuf)
+    }
+
+    const queryRowsData = async (dbPath: string, sql: string): Promise<Buffer[]> => {
+      const result = await wcdbService.execQuery('media', dbPath, sql)
+      if (!result.success || !Array.isArray(result.rows) || result.rows.length === 0) return []
+      const output: Buffer[] = []
+      for (const row of result.rows as Record<string, any>[]) {
+        const decoded = this.decodeVoiceBlob(row.data ?? row.voice_data ?? row.buf ?? row.voicebuf)
+        if (decoded && decoded.length > 0) output.push(decoded)
+      }
+      return output
+    }
+
+    for (const dbPath of mediaDbs) {
+      try {
+        const tableResult = await wcdbService.execQuery(
+          'media',
+          dbPath,
+          "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'VoiceInfo%' ORDER BY name ASC"
+        )
+        if (!tableResult.success || !Array.isArray(tableResult.rows) || tableResult.rows.length === 0) continue
+
+        const name2IdResult = await wcdbService.execQuery(
+          'media',
+          dbPath,
+          "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Name2Id%' ORDER BY name ASC LIMIT 1"
+        )
+        const name2IdTable = name2IdResult.success && Array.isArray(name2IdResult.rows) && name2IdResult.rows.length > 0
+          ? this.getRowString(name2IdResult.rows[0] as Record<string, any>, ['name'])
+          : ''
+
+        for (const tableRow of tableResult.rows as Record<string, any>[]) {
+          const voiceTable = this.getRowString(tableRow, ['name'])
+          if (!voiceTable) continue
+
+          const schemaResult = await wcdbService.execQuery('media', dbPath, `PRAGMA table_info(${this.quoteSqlIdentifier(voiceTable)})`)
+          if (!schemaResult.success || !Array.isArray(schemaResult.rows) || schemaResult.rows.length === 0) continue
+          const columnNames = schemaResult.rows
+            .map(row => this.getRowString(row as Record<string, any>, ['name']).trim())
+            .filter(Boolean)
+          const lowerToActual = new Map<string, string>()
+          for (const col of columnNames) lowerToActual.set(col.toLowerCase(), col)
+          const pickColumn = (names: string[]): string => {
+            for (const name of names) {
+              const actual = lowerToActual.get(name.toLowerCase())
+              if (actual) return actual
+            }
+            return ''
+          }
+
+          const dataColumn = pickColumn(['voice_data', 'buf', 'voicebuf', 'data'])
+          const chatNameIdColumn = pickColumn(['chat_name_id', 'chatnameid', 'chat_nameid'])
+          const timeColumn = pickColumn(['create_time', 'createtime', 'time'])
+          const svrIdColumn = pickColumn(['msg_svr_id', 'msgsvrid', 'svr_id', 'svrid', 'server_id', 'serverid'])
+          if (!dataColumn) continue
+
+          const dataExpr = `hex(${this.quoteSqlIdentifier(dataColumn)}) AS data`
+          const voiceTableSql = this.quoteSqlIdentifier(voiceTable)
+
+          // A. svr_id 精确匹配，优先结合 chat_name_id 限定候选身份。
+          if (svrIdColumn && svrIdToken && svrIdToken !== '0') {
+            if (chatNameIdColumn && name2IdTable && candidateList.length > 0) {
+              for (const candidate of candidateList) {
+                const nameSql = `SELECT rowid FROM ${this.quoteSqlIdentifier(name2IdTable)} WHERE user_name = '${this.escapeSqlString(candidate)}' LIMIT 1`
+                const nameResult = await wcdbService.execQuery('media', dbPath, nameSql)
+                const chatNameId = nameResult.success && Array.isArray(nameResult.rows) && nameResult.rows.length > 0
+                  ? this.toSafeInt((nameResult.rows[0] as Record<string, any>).rowid, 0)
+                  : 0
+                if (!chatNameId) continue
+
+                const sql = `SELECT ${dataExpr} FROM ${voiceTableSql} WHERE ${this.quoteSqlIdentifier(chatNameIdColumn)} = ${chatNameId} AND ${this.quoteSqlIdentifier(svrIdColumn)} = ${svrIdToken} LIMIT 1`
+                const data = await queryFirstData(dbPath, sql)
+                if (data && data.length > 0) {
+                  lookupPath?.push(`fallback命中: db=${dbPath}, table=${voiceTable}, strategy=svr+chat`)
+                  return data
+                }
+              }
+            }
+
+            const sql = `SELECT ${dataExpr} FROM ${voiceTableSql} WHERE ${this.quoteSqlIdentifier(svrIdColumn)} = ${svrIdToken} LIMIT 1`
+            const data = await queryFirstData(dbPath, sql)
+            if (data && data.length > 0) {
+              lookupPath?.push(`fallback命中: db=${dbPath}, table=${voiceTable}, strategy=svr`)
+              return data
+            }
+          }
+
+          // B. chat_name_id + create_time；多条同秒时按消息表中的 local_id 顺序取相对位置。
+          if (chatNameIdColumn && timeColumn && name2IdTable && candidateList.length > 0) {
+            for (const candidate of candidateList) {
+              const nameSql = `SELECT rowid FROM ${this.quoteSqlIdentifier(name2IdTable)} WHERE user_name = '${this.escapeSqlString(candidate)}' LIMIT 1`
+              const nameResult = await wcdbService.execQuery('media', dbPath, nameSql)
+              const chatNameId = nameResult.success && Array.isArray(nameResult.rows) && nameResult.rows.length > 0
+                ? this.toSafeInt((nameResult.rows[0] as Record<string, any>).rowid, 0)
+                : 0
+              if (!chatNameId) continue
+
+              const sql = `SELECT ${dataExpr} FROM ${voiceTableSql} WHERE ${this.quoteSqlIdentifier(chatNameIdColumn)} = ${chatNameId} AND ${this.quoteSqlIdentifier(timeColumn)} = ${createTimeInt} ORDER BY rowid ASC`
+              const rows = await queryRowsData(dbPath, sql)
+              if (rows.length === 1) {
+                lookupPath?.push(`fallback命中: db=${dbPath}, table=${voiceTable}, strategy=chat+time`)
+                return rows[0]
+              }
+              if (rows.length > 1) {
+                const idx = await getSameTimeIndex()
+                lookupPath?.push(`fallback命中: db=${dbPath}, table=${voiceTable}, strategy=chat+time+index, rows=${rows.length}, idx=${idx}`)
+                return rows[Math.min(idx, rows.length - 1)]
+              }
+            }
+          }
+
+          // C. 仅 create_time 兜底。
+          if (timeColumn) {
+            const sql = `SELECT ${dataExpr} FROM ${voiceTableSql} WHERE ${this.quoteSqlIdentifier(timeColumn)} = ${createTimeInt} ORDER BY rowid ASC`
+            const rows = await queryRowsData(dbPath, sql)
+            if (rows.length === 1) {
+              lookupPath?.push(`fallback命中: db=${dbPath}, table=${voiceTable}, strategy=time`)
+              return rows[0]
+            }
+            if (rows.length > 1) {
+              const idx = await getSameTimeIndex()
+              lookupPath?.push(`fallback命中: db=${dbPath}, table=${voiceTable}, strategy=time+index, rows=${rows.length}, idx=${idx}`)
+              return rows[Math.min(idx, rows.length - 1)]
+            }
+          }
+        }
+      } catch (error) {
+        lookupPath?.push(`fallback跳过db=${dbPath}: ${String(error)}`)
+      }
+    }
+
+    lookupPath?.push('fallback直查media.db未命中')
+    return null
+  }
+
   async preloadVoiceDataBatch(
     sessionId: string,
     messages: Array<{
@@ -8987,18 +9516,35 @@ class ChatService {
           byIndex.set(idx, hex)
         }
 
-        const readyItems: Array<{ cacheKey: string; hex: string }> = []
+        const readyItems: Array<{
+          cacheKey: string
+          hex: string
+          request: { session_id: string; create_time: number; local_id: number; svr_id: string | number; candidates: string[] }
+        }> = []
         for (let rowIdx = 0; rowIdx < chunk.length; rowIdx += 1) {
           const hex = byIndex.get(rowIdx)
           if (!hex) continue
-          readyItems.push({ cacheKey: chunk[rowIdx].cacheKey, hex })
+          readyItems.push({ cacheKey: chunk[rowIdx].cacheKey, hex, request: chunk[rowIdx].request })
         }
 
         await this.forEachWithConcurrency(readyItems, decodeConcurrency, async (item) => {
-          const silkData = this.decodeVoiceBlob(item.hex)
+          let silkData = this.decodeVoiceBlob(item.hex)
           if (!silkData || silkData.length === 0) return
 
-          const pcmData = await this.decodeSilkToPcm(silkData, 24000)
+          let pcmData = await this.decodeSilkToPcm(silkData, 24000)
+          if (!pcmData || pcmData.length === 0) {
+            const fallbackSilk = await this.getVoiceDataFromMediaDbFallback(
+              item.request.session_id,
+              item.request.create_time,
+              item.request.local_id,
+              item.request.svr_id,
+              item.request.candidates
+            )
+            if (fallbackSilk && fallbackSilk.length > 0) {
+              silkData = fallbackSilk
+              pcmData = await this.decodeSilkToPcm(silkData, 24000)
+            }
+          }
           if (!pcmData || pcmData.length === 0) return
 
           const wavData = this.createWavBuffer(pcmData, 24000)
@@ -9119,27 +9665,29 @@ class ChatService {
     msgId: string,
     createTime?: number,
     onPartial?: (text: string) => void,
-    senderWxid?: string
+    senderWxid?: string,
+    inputServerId?: string | number
   ): Promise<{ success: boolean; transcript?: string; error?: string }> {
     const startTime = Date.now()
 
     // 确保磁盘缓存已加载
     this.loadTranscriptCacheIfNeeded()
 
-    try {
-      let msgCreateTime = createTime
-      let serverId: string | number | undefined
+      try {
+        let msgCreateTime = createTime
+        let serverId: string | number | undefined = this.normalizeUnsignedIntegerToken(inputServerId) || undefined
 
-      // 如果前端没传 createTime，才需要查询消息（这个很慢）
-      if (!msgCreateTime) {
+      // 如果缺 createTime/serverId/senderWxid，查询一次消息补强定位键，避免同秒语音或 localId 冲突拿错 BLOB。
+      if (!msgCreateTime || !serverId || !senderWxid) {
         const t1 = Date.now()
         const msgResult = await this.getMessageById(sessionId, parseInt(msgId, 10))
         const t2 = Date.now()
 
 
         if (msgResult.success && msgResult.message) {
-          msgCreateTime = msgResult.message.createTime
-          serverId = msgResult.message.serverIdRaw || msgResult.message.serverId
+          if (!msgCreateTime) msgCreateTime = msgResult.message.createTime
+          if (!serverId) serverId = msgResult.message.serverIdRaw || msgResult.message.serverId
+          if (!senderWxid) senderWxid = msgResult.message.senderUsername || undefined
 
         }
       }
@@ -10246,14 +10794,14 @@ class ChatService {
             (!message.senderUsername || message.isSend === null)
 
           if (needsDetailHydration && sessionId) {
-            const detail = await this.getMessageById(sessionId, message.localId)
-            if (detail.success && detail.message) {
+            const detail = await this.getSearchDetailHydration(sessionId, message)
+            if (detail) {
               message = {
                 ...message,
-                ...detail.message,
-                parsedContent: message.parsedContent || detail.message.parsedContent,
-                rawContent: message.rawContent || detail.message.rawContent,
-                content: message.content || detail.message.content
+                ...detail,
+                parsedContent: message.parsedContent || detail.parsedContent,
+                rawContent: message.rawContent || detail.rawContent,
+                content: message.content || detail.content
               }
             }
           }
@@ -10271,6 +10819,50 @@ class ChatService {
       console.error('ChatService: searchMessages 失败:', e)
       return { success: false, error: String(e) }
     }
+  }
+
+  private async getSearchDetailHydration(sessionId: string, searchHit: Message): Promise<Message | null> {
+    const localId = Number(searchHit.localId || 0)
+    if (!Number.isFinite(localId) || localId <= 0) return null
+
+    const detail = await this.getMessageById(sessionId, localId)
+    if (detail.success && detail.message && this.isSameMessageIdentity(searchHit, detail.message)) {
+      return detail.message
+    }
+
+    const createTime = this.normalizeTimestampSeconds(Number(searchHit.createTime || 0))
+    if (createTime <= 0) return null
+
+    try {
+      const nearby = await this.getMessages(sessionId, 0, 80, createTime - 1, createTime + 1, false)
+      if (!nearby.success || !Array.isArray(nearby.messages)) return null
+      return nearby.messages.find((message) => this.isSameMessageIdentity(searchHit, message)) || null
+    } catch (error) {
+      console.warn('[ChatService] search detail hydration fallback failed:', error)
+      return null
+    }
+  }
+
+  private isSameMessageIdentity(expected: Message, candidate: Message): boolean {
+    const expectedLocalId = Number(expected.localId || 0)
+    const candidateLocalId = Number(candidate.localId || 0)
+    if (expectedLocalId > 0 && candidateLocalId > 0 && expectedLocalId !== candidateLocalId) {
+      return false
+    }
+
+    const expectedCreateTime = this.normalizeTimestampSeconds(Number(expected.createTime || 0))
+    const candidateCreateTime = this.normalizeTimestampSeconds(Number(candidate.createTime || 0))
+    if (expectedCreateTime > 0 && candidateCreateTime > 0 && expectedCreateTime !== candidateCreateTime) {
+      return false
+    }
+
+    const expectedDbPath = String(expected._db_path || '').trim()
+    const candidateDbPath = String(candidate._db_path || '').trim()
+    if (expectedDbPath && candidateDbPath && expectedDbPath !== candidateDbPath) {
+      return false
+    }
+
+    return true
   }
 
   private normalizeTimestampSeconds(value: number): number {
@@ -10828,7 +11420,9 @@ class ChatService {
       latest_ts: this.toSafeInt(item?.latest_ts, 0),
       anchor_local_id: this.toSafeInt(item?.anchor_local_id, 0),
       anchor_create_time: this.toSafeInt(item?.anchor_create_time, 0),
-      displayName: String(item?.displayName || '').trim() || undefined,
+      displayName: typeof item?.displayName === 'string' && item.displayName.length > 0
+        ? (item.displayName.trim() || item.displayName)
+        : undefined,
       avatarUrl: String(item?.avatarUrl || '').trim() || undefined
     })).filter((item: MyFootprintPrivateSegment) => item.session_id && item.start_ts > 0)
 
@@ -11909,10 +12503,13 @@ class ChatService {
 
   private async parseMessage(row: any, options?: { source?: 'search' | 'detail'; sessionId?: string }): Promise<Message> {
     const sourceInfo = this.getMessageSourceInfo(row)
-    const rawContent = this.decodeMessageContent(
+    let rawContent = this.decodeMessageContent(
       row.message_content,
       row.compress_content
     )
+    if (!rawContent && row.content !== undefined && row.content !== null) {
+      rawContent = String(row.content)
+    }
     // 这里复用 parseMessagesBatch 里面的解析逻辑，为了简单我这里先写个基础的
     // 实际项目中建议抽取 parseRawMessage(row) 供多处使用
     const localId = this.getRowInt(row, ['local_id'], 0)

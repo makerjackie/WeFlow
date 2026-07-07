@@ -12,7 +12,9 @@ import { useExportTaskStore } from '../../../stores/exportTaskStore'
 import { buildProgressPayloadSignature } from '../utils/progress'
 import { resolvePerfStageByPhase, applyProgressToTaskPerformance } from '../utils/performance'
 import { emitExportSessionStatus, onExportSessionStatusRequest } from '../../../services/exportBridge'
+import { useAutomationStore } from './useAutomation'
 import type { ExportProgress } from '../types'
+import type { ExportAutomationTask } from '../../../types/exportAutomation'
 
 export interface ExportTasksResult {
   tasks: ExportTask[]
@@ -24,6 +26,14 @@ export interface ExportTasksResult {
 }
 
 const generateTaskId = () => `task-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`
+
+const updateAutomationRunState = (
+  automationTaskId: string | undefined,
+  updater: (prev: ExportAutomationTask) => ExportAutomationTask
+) => {
+  if (!automationTaskId) return
+  void useAutomationStore.getState().updateTask(automationTaskId, updater)
+}
 
 export function useExportTasks(): ExportTasksResult {
   const [tasks, setTasks] = useState<ExportTask[]>([])
@@ -82,6 +92,20 @@ export function useExportTasks(): ExportTasksResult {
 
     setTasks(prev => [newTask, ...prev])
 
+    if (payload.source === 'automation') {
+      updateAutomationRunState(payload.automationTaskId, (prev) => ({
+        ...prev,
+        updatedAt: Date.now(),
+        runState: {
+          ...(prev.runState || {}),
+          lastRunStatus: 'running',
+          lastStartedAt: Date.now(),
+          lastSkipReason: undefined,
+          lastError: undefined
+        }
+      }))
+    }
+
     // Kick off via electron API
     const run = async () => {
       let progressUnsubscribe: (() => void) | null = null
@@ -138,14 +162,47 @@ export function useExportTasks(): ExportTasksResult {
           sessionOutputPaths: result?.sessionOutputPaths
         }))
 
+        if (payload.source === 'automation') {
+          const finishedAt = Date.now()
+          updateAutomationRunState(payload.automationTaskId, (prev) => {
+            const previousSuccessCount = Math.max(0, Math.floor(Number(prev.runState?.successCount || 0)))
+            return {
+              ...prev,
+              updatedAt: finishedAt,
+              runState: {
+                ...(prev.runState || {}),
+                lastRunStatus: result?.success ? 'success' : 'error',
+                lastFinishedAt: finishedAt,
+                lastSuccessAt: result?.success ? finishedAt : prev.runState?.lastSuccessAt,
+                lastError: result?.success ? undefined : (result?.error || '导出失败'),
+                successCount: result?.success ? previousSuccessCount + 1 : previousSuccessCount
+              }
+            }
+          })
+        }
+
       } catch (err: any) {
         console.error('[useExportTasks] Task failed:', err)
+        const errorMessage = err.message || '未知错误'
         updateTask(taskId, (task) => ({
           ...task,
           status: 'error',
           finishedAt: Date.now(),
-          error: err.message || '未知错误'
+          error: errorMessage
         }))
+        if (payload.source === 'automation') {
+          const finishedAt = Date.now()
+          updateAutomationRunState(payload.automationTaskId, (prev) => ({
+            ...prev,
+            updatedAt: finishedAt,
+            runState: {
+              ...(prev.runState || {}),
+              lastRunStatus: 'error',
+              lastFinishedAt: finishedAt,
+              lastError: errorMessage
+            }
+          }))
+        }
       } finally {
         if (progressUnsubscribe) {
           progressUnsubscribe()

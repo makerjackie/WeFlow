@@ -103,8 +103,7 @@ npm run dev
 ### 联系方式
 
 欢迎发送邮件至：
-
-<a href="mailto:yccccccy@proton.me"><img src="https://img.shields.io/badge/Email-yccccccy%40proton.me-60A5FA?style=flat-square&logo=proton&logoColor=white&labelColor=2A3B4C" alt="Protonmail" height="24px"></a>
+原作者已删除，为保护作者隐私隐藏
 
 ## 合作伙伴
 
@@ -122,24 +121,11 @@ npm run dev
 ## 贡献者
 
 感谢所有做出贡献的开发者！
-
-<p align="center">
-  <a href="https://github.com/hicccc77/WeFlow/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=hicccc77/WeFlow" alt="Contributors" />
-  </a>
-</p>
+原作者已删除，为保护作者隐私隐藏
 
 ## Star History
 
-<a href="https://www.star-history.com/#hicccc77/WeFlow&type=date&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=hicccc77/WeFlow&type=date&theme=dark&legend=top-left" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=hicccc77/WeFlow&type=date&legend=top-left" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=hicccc77/WeFlow&type=date&legend=top-left" />
-  </picture>
-</a>
-
-<div align="center">
+原作者已删除，为保护作者隐私隐藏
 
 ---
 

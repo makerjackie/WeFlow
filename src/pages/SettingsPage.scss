@@ -311,6 +311,18 @@
     &:hover {
       opacity: 0.8;
     }
+
+    &.is-primary {
+      color: #0f62fe;
+      font-weight: 600;
+    }
+  }
+
+  .mac-key-help-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 6px;
   }
 
   .manual-prompt {
@@ -3803,5 +3815,4 @@
     }
   }
 }
-
 

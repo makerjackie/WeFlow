@@ -14,7 +14,9 @@ import './WelcomePage.scss'
 const isMac = navigator.userAgent.toLowerCase().includes('mac')
 const isLinux = navigator.userAgent.toLowerCase().includes('linux')
 const isWindows = !isMac && !isLinux
-const MAC_KEY_FAQ_URL = 'https://github.com/hicccc77/WeFlow/blob/main/docs/MAC-KEY-FAQ.md'
+const WECHAT_MAC_RELEASE_URL = 'https://github.com/canc3s/wechat-versions/releases/tag/v4.1.8.100-mac'
+const WECHAT_MAC_DOWNLOAD_URL = 'https://github.com/canc3s/wechat-versions/releases/download/v4.1.8.100-mac/WeChatMac_4.1.8.dmg'
+const WECHAT_MAC_DOWNLOAD_SHA256 = 'f40488335cd64422b7a4e144595da0b33cbc64ea8809278871a98b2de5dfed67'
 
 const DB_PATH_CHINESE_ERROR = '路径包含中文字符，迁移至全英文目录后再试'
 const dbPathPlaceholder = isMac
@@ -530,8 +532,12 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     }
   }
 
-  const openMacKeyFaq = () => {
-    void window.electronAPI.shell.openExternal(MAC_KEY_FAQ_URL)
+  const openCompatibleWeChatDownload = () => {
+    void window.electronAPI.shell.openExternal(WECHAT_MAC_DOWNLOAD_URL)
+  }
+
+  const openCompatibleWeChatRelease = () => {
+    void window.electronAPI.shell.openExternal(WECHAT_MAC_RELEASE_URL)
   }
 
   const handleManualConfirm = async () => {
@@ -1192,9 +1198,14 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
             <div className="error-message">
               <div className="error-text">{error}</div>
               {isMac && error === lastDbKeyError && (
-                <button type="button" className="error-link-btn" onClick={openMacKeyFaq}>
-                  查看 macOS 获取密钥排障指引
-                </button>
+                <div className="error-link-actions">
+                  <button type="button" className="error-link-btn is-primary" onClick={openCompatibleWeChatDownload}>
+                    下载微信 4.1.8.100
+                  </button>
+                  <button type="button" className="error-link-btn" onClick={openCompatibleWeChatRelease}>
+                    查看版本与校验值
+                  </button>
+                </div>
               )}
             </div>
           )}
@@ -1203,6 +1214,16 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
             <div className="intro-footer">
               <p>接下来的几个步骤将引导你连接本地微信数据库。</p>
               <p>WeFlow 需要访问你的本地数据文件以提供分析与导出功能。</p>
+              {isMac && (
+                <div className="mac-version-note">
+                  <p>使用微信 4.1.11 或更新版本时，WeFlow 暂时无法自动获取密钥。推荐先安装微信 4.1.8.100，无需重启 Mac。</p>
+                  <div className="mac-version-actions">
+                    <button type="button" onClick={openCompatibleWeChatDownload}>下载兼容版微信</button>
+                    <button type="button" onClick={openCompatibleWeChatRelease}>版本说明</button>
+                  </div>
+                  <code>SHA256: {WECHAT_MAC_DOWNLOAD_SHA256}</code>
+                </div>
+              )}
             </div>
           )}
 

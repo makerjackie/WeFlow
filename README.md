@@ -10,18 +10,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/hicccc77/WeFlow/stargazers"><img src="https://img.shields.io/github/stars/hicccc77/WeFlow?style=flat&label=Stars&labelColor=2A3B4C&color=60A5FA" alt="Stargazers"></a>
-  <a href="https://github.com/hicccc77/WeFlow/network/members"><img src="https://img.shields.io/github/forks/hicccc77/WeFlow?style=flat&label=Forks&labelColor=2A3B4C&color=60A5FA" alt="Forks"></a>
-  <a href="https://github.com/hicccc77/WeFlow/releases"><img src="https://img.shields.io/github/downloads/hicccc77/WeFlow/total?style=flat&label=Downloads&labelColor=2A3B4C&color=60A5FA" alt="Downloads"></a>
+  <a href="https://github.com/makerjackie/WeFlow/stargazers"><img src="https://img.shields.io/github/stars/makerjackie/WeFlow?style=flat&label=Stars&labelColor=2A3B4C&color=60A5FA" alt="Stargazers"></a>
+  <a href="https://github.com/makerjackie/WeFlow/network/members"><img src="https://img.shields.io/github/forks/makerjackie/WeFlow?style=flat&label=Forks&labelColor=2A3B4C&color=60A5FA" alt="Forks"></a>
+  <a href="https://github.com/makerjackie/WeFlow/releases"><img src="https://img.shields.io/github/downloads/makerjackie/WeFlow/total?style=flat&label=Downloads&labelColor=2A3B4C&color=60A5FA" alt="Downloads"></a>
   <br><br>
   <a href="https://t.me/weflow_cc"><img src="https://img.shields.io/badge/Telegram-频道-60A5FA?style=flat&logo=telegram&logoColor=white&labelColor=2A3B4C&color=60A5FA" alt="Telegram Channel" style="height: 24px; vertical-align: middle;"></a>
-  <a href="https://star-history.com/#hicccc77/WeFlow"><img src="https://api.star-history.com/badge?repo=hicccc77/WeFlow&theme=dark" alt="Star History Rank" style="height: 30px; vertical-align: middle;"></a>
+  <a href="https://star-history.com/#makerjackie/WeFlow"><img src="https://api.star-history.com/badge?repo=makerjackie/WeFlow&theme=dark" alt="Star History Rank" style="height: 30px; vertical-align: middle;"></a>
 </p>
 
 > [!TIP]
-> 仅支持微信 **4.0 及以上**版本
+> 支持微信 **4.0 及以上**版本。macOS 上首次自动获取密钥时，推荐使用微信 **4.1.8.100**；WeFlow 当前内置 helper 暂未适配微信 4.1.11 及更新版本。
 >
 > 如果导出聊天记录后，想深入分析聊天内容可以试试 [ChatLab](https://chatlab.fun/)
+
+官网与备用下载：[weflow.01mvp.com](https://weflow.01mvp.com) · [v5.0.1 更新说明](docs/releases/v5.0.1.md)
 
 
 ## 主要功能
@@ -44,7 +46,7 @@
 
 ## 快速开始
 
-若你只想使用成品版本，可前往 [Releases](https://github.com/hicccc77/WeFlow/releases) 下载并安装。
+若你只想使用成品版本，可从 [WeFlow 官网](https://weflow.01mvp.com) 下载，或前往 [GitHub Releases](https://github.com/makerjackie/WeFlow/releases)。
 
 ArchLinux 用户可以选择 `yay -S weflow` 快速安装
 
@@ -81,7 +83,7 @@ WeFlow 提供本地 HTTP API 服务，支持通过接口查询消息数据，可
 
 ```bash
 # 1. 克隆项目到本地
-git clone https://github.com/hicccc77/WeFlow.git
+git clone https://github.com/makerjackie/WeFlow.git
 cd WeFlow
 
 # 2. 安装项目依赖

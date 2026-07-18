@@ -76,7 +76,8 @@ const aiTabs: Array<{ id: Extract<SettingsTab, 'aiCommon' | 'insight' | 'aiFootp
 const isMac = navigator.userAgent.toLowerCase().includes('mac')
 const isLinux = navigator.userAgent.toLowerCase().includes('linux')
 const isWindows = !isMac && !isLinux
-const MAC_KEY_FAQ_URL = 'https://github.com/hicccc77/WeFlow/blob/main/docs/MAC-KEY-FAQ.md'
+const WECHAT_MAC_RELEASE_URL = 'https://github.com/canc3s/wechat-versions/releases/tag/v4.1.8.100-mac'
+const WECHAT_MAC_DOWNLOAD_URL = 'https://github.com/canc3s/wechat-versions/releases/download/v4.1.8.100-mac/WeChatMac_4.1.8.dmg'
 const DEFAULT_GROUP_SUMMARY_SYSTEM_PROMPT = String(groupSummaryPrompt.defaultSystemPrompt || '').trim()
 
 const dbDirName = isMac ? '2.0b4.0.9 目录' : 'xwechat_files 目录'
@@ -1412,8 +1413,12 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     }
   }
 
-  const openMacKeyFaq = () => {
-    void window.electronAPI.shell.openExternal(MAC_KEY_FAQ_URL)
+  const openCompatibleWeChatDownload = () => {
+    void window.electronAPI.shell.openExternal(WECHAT_MAC_DOWNLOAD_URL)
+  }
+
+  const openCompatibleWeChatRelease = () => {
+    void window.electronAPI.shell.openExternal(WECHAT_MAC_RELEASE_URL)
   }
 
   const handleManualConfirm = async () => {
@@ -2423,9 +2428,14 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         )}
         {dbKeyStatus && <div className="form-hint status-text">{dbKeyStatus}</div>}
         {isMac && dbKeyError && (
-          <button type="button" className="mac-key-faq-link" onClick={openMacKeyFaq}>
-            查看 macOS 获取密钥排障指引
-          </button>
+          <div className="mac-key-help-actions">
+            <button type="button" className="mac-key-faq-link is-primary" onClick={openCompatibleWeChatDownload}>
+              下载微信 4.1.8.100
+            </button>
+            <button type="button" className="mac-key-faq-link" onClick={openCompatibleWeChatRelease}>
+              查看版本与校验值
+            </button>
+          </div>
         )}
       </div>
 
@@ -5178,9 +5188,9 @@ JSON 输出格式：
       <div className="about-footer">
         <p className="about-desc">微信聊天记录分析工具</p>
         <div className="about-links">
-          <a href="#" onClick={(e) => { e.preventDefault(); window.electronAPI.shell.openExternal('https://weflow.top') }}>官网</a>
+          <a href="#" onClick={(e) => { e.preventDefault(); window.electronAPI.shell.openExternal('https://weflow.01mvp.com') }}>官网</a>
           <span>·</span>
-          <a href="#" onClick={(e) => { e.preventDefault(); window.electronAPI.shell.openExternal('https://github.com/hicccc77/WeFlow') }}>GitHub 仓库</a>
+          <a href="#" onClick={(e) => { e.preventDefault(); window.electronAPI.shell.openExternal('https://github.com/makerjackie/WeFlow') }}>GitHub 仓库</a>
           <span>·</span>
           <a href="#" onClick={(e) => { e.preventDefault(); window.electronAPI.shell.openExternal('https://chatlab.fun') }}>ChatLab</a>
           <span>·</span>
@@ -5669,9 +5679,6 @@ JSON 输出格式：
 }
 
 export default SettingsPage
-
-
-
 
 
 

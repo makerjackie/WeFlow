@@ -681,6 +681,12 @@
   width: 100%;
 }
 
+.error-link-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
 .error-link-btn {
   border: none;
   background: transparent;
@@ -693,6 +699,10 @@
   &:hover {
     opacity: 0.9;
   }
+
+  &.is-primary {
+    font-weight: 600;
+  }
 }
 
 .intro-footer {
@@ -704,6 +714,49 @@
 
   p {
     margin: 0 0 4px;
+  }
+}
+
+.mac-version-note {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: left;
+
+  p {
+    margin: 0;
+  }
+
+  code {
+    display: block;
+    margin-top: 8px;
+    overflow-wrap: anywhere;
+    color: var(--text-tertiary);
+    font-size: 10px;
+  }
+}
+
+.mac-version-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+
+  button {
+    border: none;
+    background: transparent;
+    color: #0f62fe;
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0;
+
+    &:hover {
+      opacity: 0.85;
+    }
   }
 }
 

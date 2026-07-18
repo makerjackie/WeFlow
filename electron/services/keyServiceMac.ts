@@ -9,6 +9,9 @@ import { homedir } from 'os'
 type DbKeyResult = { success: boolean; key?: string; error?: string; logs?: string[] }
 type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
 const execFileAsync = promisify(execFile)
+const WECHAT_MAC_COMPATIBLE_VERSION = '4.1.8.100'
+const WECHAT_MAC_DOWNLOAD_URL = 'https://github.com/canc3s/wechat-versions/releases/download/v4.1.8.100-mac/WeChatMac_4.1.8.dmg'
+const WECHAT_MAC_DOWNLOAD_SHA256 = 'f40488335cd64422b7a4e144595da0b33cbc64ea8809278871a98b2de5dfed67'
 
 export class KeyServiceMac {
   private koffi: any = null
@@ -159,18 +162,63 @@ export class KeyServiceMac {
     }
   }
 
+  private async getInstalledWeChatVersion(): Promise<string | null> {
+    const infoPlistPath = '/Applications/WeChat.app/Contents/Info.plist'
+    if (!existsSync(infoPlistPath)) return null
+
+    try {
+      const { stdout } = await execFileAsync('/usr/bin/plutil', [
+        '-extract',
+        'CFBundleShortVersionString',
+        'raw',
+        infoPlistPath
+      ])
+      const version = String(stdout || '').trim()
+      return version || null
+    } catch {
+      return null
+    }
+  }
+
+  private compareVersion(left: string, right: string): number {
+    const toParts = (value: string): number[] => value
+      .split('.')
+      .map(part => Number.parseInt(part, 10))
+      .map(part => Number.isFinite(part) ? part : 0)
+    const leftParts = toParts(left)
+    const rightParts = toParts(right)
+    const count = Math.max(leftParts.length, rightParts.length)
+    for (let i = 0; i < count; i += 1) {
+      const diff = (leftParts[i] || 0) - (rightParts[i] || 0)
+      if (diff !== 0) return diff > 0 ? 1 : -1
+    }
+    return 0
+  }
+
+  private getUnsupportedWeChatMessage(version?: string | null): string {
+    const currentVersion = version ? `（检测到 ${version}）` : ''
+    return `当前 WeFlow 的 macOS 密钥自动获取暂不兼容微信 4.1.11 及更新版本${currentVersion}。请完全退出微信，安装微信 ${WECHAT_MAC_COMPATIBLE_VERSION} 后重新打开微信并重试；无需重启 Mac，其他功能不受影响。\n下载：${WECHAT_MAC_DOWNLOAD_URL}\nSHA256：${WECHAT_MAC_DOWNLOAD_SHA256}`
+  }
+
   async autoGetDbKey(
     timeoutMs = 60_000,
     onStatus?: (message: string, level: number) => void
   ): Promise<DbKeyResult> {
     try {
-      // 检测 SIP 状态
+      const weChatVersion = await this.getInstalledWeChatVersion()
+      if (weChatVersion) {
+        onStatus?.(`检测到微信版本 ${weChatVersion}`, 0)
+      }
+      if (weChatVersion && this.compareVersion(weChatVersion, '4.1.11') >= 0) {
+        const versionError = this.getUnsupportedWeChatMessage(weChatVersion)
+        onStatus?.(versionError, 2)
+        return { success: false, error: versionError }
+      }
+
+      // SIP 开启时仍继续尝试管理员授权，不再要求用户重启电脑。
       const sipStatus = await this.checkSipStatus()
       if (sipStatus.enabled) {
-        return {
-          success: false,
-          error: 'SIP (系统完整性保护) 已开启，无法获取密钥。请关闭 SIP 后重试。\n\n关闭方法：\n1. Intel 芯片：重启 Mac 并按住 Command + R 进入恢复模式\n2. Apple 芯片（M 系列）：关机后长按开机（指纹）键，选择“设置（选项）”进入恢复模式\n3. 打开终端，输入: csrutil disable\n4. 重启电脑'
-        }
+        onStatus?.('SIP 已启用，将继续请求管理员授权；无需重启 Mac。', 0)
       }
 
       onStatus?.('正在获取数据库密钥...', 0)
@@ -277,9 +325,9 @@ export class KeyServiceMac {
 
   private getMacRecoveryHint(isRepeatedFailure: boolean): string {
     const steps = isRepeatedFailure
-      ? '建议步骤：彻底退出微信 -> 重启电脑（冷启动）-> 降级微信到 4.1.8.100 -> 仅尝试一次自动获取 -> 成功后再升级微信。'
-      : '建议步骤：降级微信到 4.1.8.100 -> 重启电脑（冷启动）-> 自动获取密钥 -> 成功后再升级微信。'
-    return `${steps}\n请不要连续重试，以免触发微信安全模式或系统内存保护。`
+      ? `请先停止重试，完全退出微信，安装微信 ${WECHAT_MAC_COMPATIBLE_VERSION}，重新打开微信后仅尝试一次自动获取。`
+      : `请完全退出微信，安装微信 ${WECHAT_MAC_COMPATIBLE_VERSION}，重新打开微信后再尝试自动获取。`
+    return `${steps}\n无需重启 Mac。下载：${WECHAT_MAC_DOWNLOAD_URL}\nSHA256：${WECHAT_MAC_DOWNLOAD_SHA256}`
   }
 
   private simplifyDbKeyDetail(detail?: string): string {
@@ -358,7 +406,7 @@ export class KeyServiceMac {
       return '获取密钥超时：请保持微信前台并进行一次会话操作后重试。'
     }
     if (text.includes('helper returned empty output') || text.includes('invalid json')) {
-      return '获取失败：helper 未返回可识别结果，请彻底退出微信后重启电脑再试。'
+      return `获取失败：helper 未返回可识别结果。${this.getMacRecoveryHint(false)}`
     }
     if (text.includes('xkey_helper not found')) {
       return '获取失败：未找到 xkey_helper，请重新安装 WeFlow 后重试。'
@@ -371,7 +419,7 @@ export class KeyServiceMac {
 
     const failureCount = this.markRestrictedFailureAndGetCount()
     if (failureCount >= 2) {
-      return `${baseMessage}\n检测到连续失败，疑似已进入受限状态。请先彻底退出微信并重启电脑，再按下方步骤处理。\n${this.getMacRecoveryHint(true)}`
+      return `${baseMessage}\n检测到连续失败，请不要继续重复尝试。\n${this.getMacRecoveryHint(true)}`
     }
     return `${baseMessage}\n${this.getMacRecoveryHint(false)}`
   }
@@ -725,10 +773,10 @@ export class KeyServiceMac {
         return '内存扫描失败：未匹配到可用特征。可能是当前微信版本更新导致，请升级 WeFlow 后重试。'
       }
       if (normalizedDetail.includes('Sink pattern not found')) {
-        return '内存扫描失败：未匹配到目标函数特征（Sink pattern not found），当前微信版本可能暂未适配。'
+        return `内存扫描失败：当前微信版本暂未适配。${this.getMacRecoveryHint(false)}`
       }
       if (normalizedDetail.includes('No suitable module found')) {
-        return '内存扫描失败：未找到可扫描的微信主模块。请确认微信已完整启动并保持前台；若仍失败，优先尝试微信 4.1.7。'
+        return `内存扫描失败：未找到可扫描的微信主模块。请确认微信已完整启动并保持前台；若仍失败，安装微信 ${WECHAT_MAC_COMPATIBLE_VERSION} 后重试，无需重启 Mac。`
       }
       return `内存扫描失败：${normalizedDetail}`
     }

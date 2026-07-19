@@ -253,6 +253,29 @@ class AnnualReportService {
       .sort((a, b) => b - a)
   }
 
+  private extractAvailableYearsFromAggregate(data: any): number[] {
+    const years = new Set<number>()
+    const currentYear = new Date().getFullYear()
+    const monthly = data?.monthly
+    if (monthly && typeof monthly === 'object') {
+      for (const key of Object.keys(monthly)) {
+        const match = String(key).match(/(?:^|\D)((?:19|20)\d{2})(?:\D|$)/)
+        const year = Number(match?.[1] || 0)
+        if (year >= 2010 && year <= currentYear) years.add(year)
+      }
+    }
+
+    // Older native builds may omit the monthly map but still expose the global
+    // time range. A contiguous range is a fast, safe fallback for the year
+    // selector and avoids scanning thousands of sessions one by one.
+    if (years.size === 0) {
+      const first = this.toUnixTimestamp(data?.firstTime ?? data?.first_time ?? data?.firstTimestamp)
+      const last = this.toUnixTimestamp(data?.lastTime ?? data?.last_time ?? data?.lastTimestamp)
+      this.addYearsFromRange(years, first, last)
+    }
+    return this.normalizeAvailableYears(years)
+  }
+
   private async forEachWithConcurrency<T>(
     items: T[],
     concurrency: number,
@@ -702,7 +725,36 @@ class AnnualReportService {
       }
       if (isCancelled()) return { success: false, error: '已取消加载年份数据', meta: buildMeta('hybrid', '已取消加载年份数据') }
 
-      const nativeTimeoutMs = Math.max(1000, Math.floor(params.nativeTimeoutMs || 5000))
+      // The analytics page already persists the same aggregate snapshot. Reuse
+      // it to derive exact years instead of repeating a full native scan after
+      // every app restart.
+      try {
+        const { analyticsService } = await import('./analyticsService')
+        const aggregateCache = await analyticsService.getCachedAggregateStats(sessionIds)
+        if (aggregateCache.success && aggregateCache.data) {
+          const years = this.extractAvailableYearsFromAggregate(aggregateCache.data)
+          if (years.length > 0) {
+            latestYears = years
+            this.setCachedAvailableYears(cacheKey, years)
+            emitProgress({
+              years,
+              strategy: 'cache',
+              phase: 'cache',
+              statusText: '命中统计缓存，已快速加载年份数据'
+            })
+            return {
+              success: true,
+              data: years,
+              meta: buildMeta('cache', '命中统计缓存，已快速加载年份数据')
+            }
+          }
+        }
+      } catch {
+        // Continue with native aggregation when the optional shared cache is
+        // unavailable (for example inside an isolated worker process).
+      }
+
+      const nativeTimeoutMs = Math.max(1000, Math.floor(params.nativeTimeoutMs || 30_000))
       const nativeStartedAt = Date.now()
       let nativeTicker: ReturnType<typeof setInterval> | null = null
 
@@ -720,10 +772,14 @@ class AnnualReportService {
         })
       }, 120)
 
+      // Aggregate stats already contain an exact monthly map (or at least the
+      // global first/last timestamps) and complete much faster than the old
+      // per-session available-years scan on large accounts.
+      const nativeRequest = wcdbService.getAggregateStats(sessionIds)
+        .then((result) => ({ kind: 'result' as const, result }))
+        .catch((error) => ({ kind: 'error' as const, error: String(error) }))
       const nativeRace = await Promise.race([
-        wcdbService.getAvailableYears(sessionIds)
-          .then((result) => ({ kind: 'result' as const, result }))
-          .catch((error) => ({ kind: 'error' as const, error: String(error) })),
+        nativeRequest,
         new Promise<{ kind: 'timeout' }>((resolve) => setTimeout(() => resolve({ kind: 'timeout' }), nativeTimeoutMs))
       ])
 
@@ -735,31 +791,54 @@ class AnnualReportService {
 
       if (isCancelled()) return { success: false, error: '已取消加载年份数据', meta: buildMeta('hybrid', '已取消加载年份数据') }
 
-      if (nativeRace.kind === 'result' && nativeRace.result.success && Array.isArray(nativeRace.result.data) && nativeRace.result.data.length > 0) {
-        const years = this.normalizeAvailableYears(nativeRace.result.data)
-        latestYears = years
-        this.setCachedAvailableYears(cacheKey, years)
+      if (nativeRace.kind === 'result' && nativeRace.result.success && nativeRace.result.data) {
+        const years = this.extractAvailableYearsFromAggregate(nativeRace.result.data)
+        if (years.length > 0) {
+          latestYears = years
+          this.setCachedAvailableYears(cacheKey, years)
+          emitProgress({
+            years,
+            strategy: 'native',
+            phase: 'native',
+            statusText: '原生快速模式加载完成'
+          })
+          return {
+            success: true,
+            data: years,
+            meta: buildMeta('native', '原生快速模式加载完成')
+          }
+        }
+      }
+
+      if (nativeRace.kind === 'timeout') {
+        nativeTimedOut = true
+        // The native call cannot be canceled once it enters WCDB. Let it finish
+        // and warm the cache, but do not queue thousands of fallback scans
+        // behind the still-running request on the same serialized worker.
+        void nativeRequest.then((lateResult) => {
+          if (lateResult.kind !== 'result' || !lateResult.result.success || !lateResult.result.data) return
+          const years = this.extractAvailableYearsFromAggregate(lateResult.result.data)
+          if (years.length > 0) this.setCachedAvailableYears(cacheKey, years)
+        }).catch(() => {})
         emitProgress({
-          years,
           strategy: 'native',
           phase: 'native',
-          statusText: '原生快速模式加载完成'
+          statusText: '年份数据仍在后台加载，请稍后重试',
+          nativeTimedOut: true
         })
         return {
-          success: true,
-          data: years,
-          meta: buildMeta('native', '原生快速模式加载完成')
+          success: false,
+          error: '年份数据仍在后台加载，请稍后重试',
+          meta: buildMeta('native', '年份数据仍在后台加载，请稍后重试')
         }
       }
 
       switched = true
-      nativeTimedOut = nativeRace.kind === 'timeout'
+      nativeTimedOut = false
       emitProgress({
         strategy: 'hybrid',
         phase: 'native',
-        statusText: nativeTimedOut
-          ? '原生快速模式超时，已自动切换到扫表兼容模式...'
-          : '原生快速模式不可用，已自动切换到扫表兼容模式...',
+        statusText: '原生快速模式不可用，已自动切换到扫表兼容模式...',
         switched: true,
         nativeTimedOut
       })

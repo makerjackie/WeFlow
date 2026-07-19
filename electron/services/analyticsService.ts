@@ -485,7 +485,7 @@ class AnalyticsService {
     }
 
     const promise = (async () => {
-      const result = await wcdbService.getAggregateStats(sessionIds, beginTimestamp, endTimestamp)
+      const result = await wcdbService.getAggregateStats(sessionIds, beginTimestamp, endTimestamp, force)
       if (result.success && result.data && result.data.total > 0) {
         this.aggregateCache = { key: cacheKey, data: result.data, updatedAt: Date.now() }
         return { success: true, data: result.data, source: 'dll' }
@@ -539,6 +539,23 @@ class AnalyticsService {
     } catch (e) {
       console.error('保存统计缓存失败:', e)
     }
+  }
+
+  async getCachedAggregateStats(
+    sessionIds: string[],
+    beginTimestamp = 0,
+    endTimestamp = 0
+  ): Promise<{ success: boolean; data?: any; error?: string }> {
+    const cacheKey = this.buildAggregateCacheKey(sessionIds, beginTimestamp, endTimestamp)
+    if (this.aggregateCache && this.aggregateCache.key === cacheKey && Number(this.aggregateCache.data?.total || 0) > 0) {
+      return { success: true, data: this.aggregateCache.data }
+    }
+    const fileCache = await this.loadCacheFromFile()
+    if (fileCache && fileCache.key === cacheKey && Number(fileCache.data?.total || 0) > 0) {
+      this.aggregateCache = fileCache
+      return { success: true, data: fileCache.data }
+    }
+    return { success: false, error: '统计缓存未命中' }
   }
 
   private normalizeAggregateSessions(

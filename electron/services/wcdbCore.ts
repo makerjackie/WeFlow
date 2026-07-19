@@ -178,6 +178,17 @@ export class WcdbCore {
   private lastLogTail: string | null = null
   private lastResolvedLogPath: string | null = null
   private lastCursorForceReopenAt = 0
+  private nextSyntheticMessageCursor = -1
+  private syntheticMessageCursors = new Map<number, {
+    sessionId: string
+    batchSize: number
+    ascending: boolean
+    beginTimestamp: number
+    endTimestamp: number
+    offset: number
+    bufferedRows?: any[]
+    bufferedOffset: number
+  }>()
   private readonly maxPendingLogLines = 1200
   private readonly logFlushDelayMs = 200
   private readonly cursorForceReopenCooldownMs = 15000
@@ -1946,6 +1957,7 @@ export class WcdbCore {
   }
 
   close(): void {
+    this.syntheticMessageCursors.clear()
     if (this.handle !== null || this.initialized) {
       // 先停止监控与云控回调，避免 shutdown 后仍有 native 回调访问已释放资源。
       try { this.stopMonitor() } catch {}
@@ -3898,6 +3910,7 @@ export class WcdbCore {
     const key = this.currentKey
     const wxid = this.currentWxid
     this.writeLog('forceReopen: clearing cached handle and reopening...', true)
+    this.syntheticMessageCursors.clear()
     // 清空缓存状态，让 open() 真正重新打开
     try { this.wcdbShutdown() } catch { }
     this.handle = null
@@ -3916,6 +3929,71 @@ export class WcdbCore {
     }
     this.lastCursorForceReopenAt = now
     return true
+  }
+
+  private createSyntheticMessageCursor(
+    sessionId: string,
+    batchSize: number,
+    ascending: boolean,
+    beginTimestamp: number,
+    endTimestamp: number
+  ): number {
+    const cursor = this.nextSyntheticMessageCursor--
+    this.syntheticMessageCursors.set(cursor, {
+      sessionId,
+      batchSize: Math.max(1, Math.floor(batchSize || 500)),
+      ascending,
+      beginTimestamp: this.normalizeTimestamp(beginTimestamp),
+      endTimestamp: this.normalizeTimestamp(endTimestamp),
+      offset: 0,
+      bufferedOffset: 0
+    })
+    return cursor
+  }
+
+  private getCursorRowTimestamp(row: any): number {
+    return this.normalizeTimestamp(Number(
+      row?.create_time ?? row?.createTime ?? row?.CreateTime ??
+      row?.msgCreateTime ?? row?.msg_create_time ?? row?.timestamp ?? row?.Timestamp ?? 0
+    ))
+  }
+
+  private filterSyntheticCursorRows(
+    rows: any[],
+    state: { beginTimestamp: number; endTimestamp: number }
+  ): any[] {
+    if (state.beginTimestamp <= 0 && state.endTimestamp <= 0) return rows
+    return rows.filter((row) => {
+      const timestamp = this.getCursorRowTimestamp(row)
+      if (state.beginTimestamp > 0 && timestamp > 0 && timestamp < state.beginTimestamp) return false
+      if (state.endTimestamp > 0 && timestamp > 0 && timestamp > state.endTimestamp) return false
+      return true
+    })
+  }
+
+  private async loadSyntheticAscendingRows(state: {
+    sessionId: string
+    batchSize: number
+    beginTimestamp: number
+    endTimestamp: number
+  }): Promise<{ success: boolean; rows?: any[]; error?: string }> {
+    const rows: any[] = []
+    const pageSize = Math.max(1000, Math.min(5000, state.batchSize))
+    let offset = 0
+    while (true) {
+      const page = await this.getMessages(state.sessionId, pageSize, offset)
+      if (!page.success) return { success: false, error: page.error || '兼容分页读取失败' }
+      const pageRows = Array.isArray(page.messages) ? page.messages : []
+      rows.push(...this.filterSyntheticCursorRows(pageRows, state))
+      offset += pageRows.length
+      if (pageRows.length < pageSize) break
+    }
+    rows.sort((a, b) => {
+      const timeDelta = this.getCursorRowTimestamp(a) - this.getCursorRowTimestamp(b)
+      if (timeDelta !== 0) return timeDelta
+      return Number(a?.local_id ?? a?.localId ?? 0) - Number(b?.local_id ?? b?.localId ?? 0)
+    })
+    return { success: true, rows }
   }
 
   async openMessageCursor(sessionId: string, batchSize: number, ascending: boolean, beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; cursor?: number; error?: string }> {
@@ -3955,6 +4033,17 @@ export class WcdbCore {
         }
       }
       if (result !== 0 || outCursor[0] <= 0) {
+        if (result === -3) {
+          const cursor = this.createSyntheticMessageCursor(
+            sessionId,
+            batchSize,
+            ascending,
+            beginTimestamp,
+            endTimestamp
+          )
+          this.writeLog('openMessageCursor: native cursor unavailable, using paged compatibility cursor', true)
+          return { success: true, cursor }
+        }
         if (result !== -3) {
           await this.printLogs(true)
           this.writeLog(
@@ -3982,6 +4071,32 @@ export class WcdbCore {
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
+      const synthetic = this.syntheticMessageCursors.get(cursor)
+      if (synthetic) {
+        if (synthetic.ascending) {
+          if (!synthetic.bufferedRows) {
+            const loaded = await this.loadSyntheticAscendingRows(synthetic)
+            if (!loaded.success) return { success: false, error: loaded.error }
+            synthetic.bufferedRows = loaded.rows || []
+          }
+          const start = synthetic.bufferedOffset
+          const end = Math.min(synthetic.bufferedRows.length, start + synthetic.batchSize)
+          const rows = synthetic.bufferedRows.slice(start, end)
+          synthetic.bufferedOffset = end
+          return { success: true, rows, hasMore: end < synthetic.bufferedRows.length }
+        }
+
+        const page = await this.getMessages(synthetic.sessionId, synthetic.batchSize, synthetic.offset)
+        if (!page.success) return { success: false, error: page.error || '兼容分页读取失败' }
+        const rawRows = Array.isArray(page.messages) ? page.messages : []
+        synthetic.offset += rawRows.length
+        return {
+          success: true,
+          rows: this.filterSyntheticCursorRows(rawRows, synthetic),
+          hasMore: rawRows.length === synthetic.batchSize
+        }
+      }
+
       const outPtr = [null as any]
       const outHasMore = [0]
       const result = this.wcdbFetchMessageBatch(this.handle, cursor, outPtr, outHasMore)
@@ -4002,6 +4117,9 @@ export class WcdbCore {
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
+      if (this.syntheticMessageCursors.delete(cursor)) {
+        return { success: true }
+      }
       const result = this.wcdbCloseMessageCursor(this.handle, cursor)
       if (result !== 0) {
         return { success: false, error: `关闭游标失败: ${result}` }

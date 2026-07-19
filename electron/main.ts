@@ -77,6 +77,25 @@ let configService: ConfigService | null = null
 const activeExportWorkers = new Map<string, Worker>()
 const activeExportTasks = new Set<string>()
 
+const handleExportWorkerWcdbRequest = (worker: Worker, msg: any): boolean => {
+  if (!msg || msg.type !== 'export:wcdbRequest') return false
+  const requestId = Number(msg.requestId || 0)
+  const method = String(msg.method || '')
+  if (!requestId || !method) return true
+  void wcdbService.invokeWorker(method, msg.payload || {})
+    .then((result) => {
+      worker.postMessage({ type: 'export:wcdbResponse', requestId, result })
+    })
+    .catch((error) => {
+      worker.postMessage({
+        type: 'export:wcdbResponse',
+        requestId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    })
+  return true
+}
+
 type ResourceDiagnosticsEntry = {
   ts: number
   payload: Record<string, unknown>
@@ -3674,6 +3693,7 @@ function registerIpcHandlers() {
         }
 
         worker.on('message', (msg: any) => {
+          if (handleExportWorkerWcdbRequest(worker, msg)) return
           if (msg && msg.type === 'export:progress') {
             onProgress(msg.data as ExportProgress)
             return
@@ -3803,6 +3823,7 @@ function registerIpcHandlers() {
         }
 
         worker.on('message', (msg: any) => {
+          if (handleExportWorkerWcdbRequest(worker, msg)) return
           if (msg && msg.type === 'export:progress') {
             if (!event.sender.isDestroyed()) {
               event.sender.send('export:progress', msg.data)
@@ -3871,6 +3892,7 @@ function registerIpcHandlers() {
         }
 
         worker.on('message', (msg: any) => {
+          if (handleExportWorkerWcdbRequest(worker, msg)) return
           if (msg && msg.type === 'export:result') {
             finalize(msg.data)
             return

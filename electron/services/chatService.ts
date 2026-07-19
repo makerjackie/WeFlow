@@ -454,6 +454,16 @@ class ChatService {
   private contactsLoadInFlight: { mode: 'lite' | 'full'; promise: Promise<{ success: boolean; contacts?: ContactInfo[]; error?: string }> } | null = null
   private contactsMemoryCache = new Map<'lite' | 'full', { scope: string; updatedAt: number; contacts: ContactInfo[] }>()
   private readonly contactsMemoryCacheTtlMs = 3 * 60 * 1000
+  private sessionsMemoryCache: { scope: string; updatedAt: number; sessions: ChatSession[] } | null = null
+  private sessionsLoadInFlight: { scope: string; generation: number; promise: Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> } | null = null
+  private sessionsCacheGeneration = 0
+  private readonly sessionsMemoryCacheTtlMs = 30 * 1000
+  private syntheticUnreadRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  private syntheticUnreadRefreshInFlight: Promise<void> | null = null
+  private syntheticUnreadRefreshGeneration = 0
+  private syntheticUnreadLastRefreshAt = 0
+  private readonly syntheticUnreadRefreshDelayMs = 60 * 1000
+  private readonly syntheticUnreadRefreshIntervalMs = 5 * 60 * 1000
   private readonly contactDisplayNameCollator = new Intl.Collator('zh-CN')
   private readonly slowGetContactsLogThresholdMs = 1200
 
@@ -756,6 +766,12 @@ class ChatService {
   }
 
   close(): void {
+    this.syntheticUnreadRefreshGeneration += 1
+    this.syntheticUnreadLastRefreshAt = 0
+    if (this.syntheticUnreadRefreshTimer) {
+      clearTimeout(this.syntheticUnreadRefreshTimer)
+      this.syntheticUnreadRefreshTimer = null
+    }
     try {
       for (const state of this.messageCursors.values()) {
         wcdbService.closeMessageCursor(state.cursor)
@@ -776,7 +792,9 @@ class ChatService {
     try {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return { success: false, error: connectResult.error }
-      return await wcdbService.updateMessage(sessionId, localId, createTime, newContent)
+      const result = await wcdbService.updateMessage(sessionId, localId, createTime, newContent)
+      if (result.success) this.invalidateSessionsMemoryCache()
+      return result
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -789,7 +807,9 @@ class ChatService {
     try {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return { success: false, error: connectResult.error }
-      return await wcdbService.deleteMessage(sessionId, localId, createTime, dbPathHint)
+      const result = await wcdbService.deleteMessage(sessionId, localId, createTime, dbPathHint)
+      if (result.success) this.invalidateSessionsMemoryCache()
+      return result
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -856,6 +876,35 @@ class ChatService {
    * 获取会话列表（优化：先返回基础数据，不等待联系人信息加载）
    */
   async getSessions(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
+    const scope = `${String(this.configService.get('dbPath') || '')}::${String(this.configService.getMyWxidCleaned() || '')}`
+    const cached = this.sessionsMemoryCache
+    if (cached && cached.scope === scope && Date.now() - cached.updatedAt <= this.sessionsMemoryCacheTtlMs) {
+      return { success: true, sessions: cached.sessions.map((session) => ({ ...session })) }
+    }
+    if (this.sessionsLoadInFlight && this.sessionsLoadInFlight.scope === scope) {
+      const result = await this.sessionsLoadInFlight.promise
+      return result.sessions ? { ...result, sessions: result.sessions.map((session) => ({ ...session })) } : result
+    }
+
+    const generation = this.sessionsCacheGeneration
+    const promise = this.getSessionsFresh()
+    this.sessionsLoadInFlight = { scope, generation, promise }
+    try {
+      const result = await promise
+      if (result.success && result.sessions && generation === this.sessionsCacheGeneration) {
+        this.sessionsMemoryCache = {
+          scope,
+          updatedAt: Date.now(),
+          sessions: result.sessions.map((session) => ({ ...session }))
+        }
+      }
+      return result.sessions ? { ...result, sessions: result.sessions.map((session) => ({ ...session })) } : result
+    } finally {
+      if (this.sessionsLoadInFlight?.promise === promise) this.sessionsLoadInFlight = null
+    }
+  }
+
+  private async getSessionsFresh(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
     try {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) {
@@ -1000,7 +1049,12 @@ class ChatService {
       }
 
       await this.addMissingOfficialSessions(sessions, myWxid)
-      await this.applySyntheticUnreadCounts(sessions)
+      // Official-account unread synthesis can trigger the first full message
+      // database discovery and used to block every session-list caller for up
+      // to a minute. Apply already known state immediately and refresh the
+      // expensive details only after the interactive startup window.
+      this.applyCachedSyntheticUnreadCounts(sessions)
+      this.scheduleSyntheticUnreadCountsRefresh(sessions)
       sessions.sort((a, b) => Number(b.sortTimestamp || b.lastTimestamp || 0) - Number(a.sortTimestamp || a.lastTimestamp || 0))
 
       // 不等待联系人信息加载，直接返回基础会话列表
@@ -1038,6 +1092,7 @@ class ChatService {
       const result = await wcdbService.markAllSessionsRead()
       if (result.success) {
         this.syntheticUnreadState.clear()
+        this.invalidateSessionsMemoryCache()
       }
       return result
     } catch (e) {
@@ -1370,6 +1425,53 @@ class ChatService {
         console.warn(`[ChatService] 合成公众号未读失败: ${session.username}`, error)
       }
     }
+  }
+
+  private applyCachedSyntheticUnreadCounts(sessions: ChatSession[]): void {
+    for (const session of sessions) {
+      if (!this.shouldUseSyntheticUnread(session.username)) continue
+      const state = this.syntheticUnreadState.get(session.username)
+      if (!state) continue
+      if (state.latestTimestamp > 0) {
+        session.lastTimestamp = Math.max(Number(session.lastTimestamp || 0), state.latestTimestamp)
+        session.sortTimestamp = Math.max(Number(session.sortTimestamp || 0), state.latestTimestamp)
+      }
+      if (state.summary) {
+        session.summary = state.summary
+        session.lastMsgType = Number(state.lastMsgType || session.lastMsgType || 0)
+      }
+      session.unreadCount = Math.max(Number(session.unreadCount || 0), state.unreadCount)
+    }
+  }
+
+  private scheduleSyntheticUnreadCountsRefresh(sessions: ChatSession[]): void {
+    if (this.syntheticUnreadRefreshTimer || this.syntheticUnreadRefreshInFlight) return
+    if (Date.now() - this.syntheticUnreadLastRefreshAt < this.syntheticUnreadRefreshIntervalMs) return
+    const candidates = sessions
+      .filter((session) => this.shouldUseSyntheticUnread(session.username))
+      .map((session) => ({ ...session }))
+    if (candidates.length === 0) return
+
+    const generation = this.syntheticUnreadRefreshGeneration
+    const scope = `${String(this.configService.get('dbPath') || '')}::${String(this.configService.getMyWxidCleaned() || '')}`
+    this.syntheticUnreadRefreshTimer = setTimeout(() => {
+      this.syntheticUnreadRefreshTimer = null
+      const currentScope = `${String(this.configService.get('dbPath') || '')}::${String(this.configService.getMyWxidCleaned() || '')}`
+      if (generation !== this.syntheticUnreadRefreshGeneration || currentScope !== scope) return
+
+      const refresh = this.applySyntheticUnreadCounts(candidates)
+        .then(() => {
+          if (generation === this.syntheticUnreadRefreshGeneration) {
+            this.syntheticUnreadLastRefreshAt = Date.now()
+            this.invalidateSessionsMemoryCache()
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (this.syntheticUnreadRefreshInFlight === refresh) this.syntheticUnreadRefreshInFlight = null
+        })
+      this.syntheticUnreadRefreshInFlight = refresh
+    }, this.syntheticUnreadRefreshDelayMs)
   }
 
   private getSessionSummaryFromMessage(message: Message): string {
@@ -4415,6 +4517,7 @@ class ChatService {
     this.messageTableColumnsCache.clear()
     this.messageDbCountSnapshotCache = null
     this.contactsMemoryCache.clear()
+    this.invalidateSessionsMemoryCache()
     this.refreshSessionStatsCacheScope(scope)
     this.refreshGroupMyMessageCountCacheScope(scope)
   }
@@ -4605,6 +4708,7 @@ class ChatService {
 
   private handleSessionStatsMonitorChange(type: string, json: string): void {
     this.refreshSessionMessageCountCacheScope()
+    this.invalidateSessionsMemoryCache()
     if (!this.sessionStatsCacheScope) return
 
     const normalizedType = String(type || '').toLowerCase()
@@ -4643,6 +4747,12 @@ class ChatService {
     ) {
       this.clearSessionStatsCacheForScope()
     }
+  }
+
+  private invalidateSessionsMemoryCache(): void {
+    this.sessionsCacheGeneration += 1
+    this.sessionsMemoryCache = null
+    this.sessionsLoadInFlight = null
   }
 
   private async listAllGroupSessionIds(): Promise<string[]> {

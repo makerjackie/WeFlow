@@ -1,4 +1,4 @@
-import { Worker } from 'worker_threads'
+import { Worker, isMainThread, parentPort } from 'worker_threads'
 import { join } from 'path'
 import { existsSync } from 'fs'
 
@@ -24,8 +24,26 @@ export class WcdbService {
   private userDataPath: string | null = null
   private logEnabled = false
   private monitorListener: ((type: string, json: string) => void) | null = null
+  private activeAccountKey = ''
+  private readonly statisticsCacheTtlMs = 5 * 60 * 1000
+  private readonly readResultCache = new Map<string, { value: any; expiresAt: number }>()
+  private readonly readResultInFlight = new Map<string, Promise<any>>()
+  private readResultCacheGeneration = 0
+  private readonly useExportParentBridge = !isMainThread && process.env.WEFLOW_EXPORT_PARENT_WCDB === '1' && Boolean(parentPort)
 
-  constructor() {}
+  constructor() {
+    if (this.useExportParentBridge) {
+      parentPort!.on('message', (msg: any) => {
+        if (!msg || msg.type !== 'export:wcdbResponse') return
+        const requestId = Number(msg.requestId || 0)
+        const pending = this.pending.get(requestId)
+        if (!pending) return
+        this.pending.delete(requestId)
+        if (msg.error) pending.reject(new Error(String(msg.error)))
+        else pending.resolve(msg.result)
+      })
+    }
+  }
 
   /**
    * 初始化 Worker 线程
@@ -50,6 +68,10 @@ export class WcdbService {
         const { id, result, error, type, payload } = msg
 
         if (type === 'monitor') {
+          // A database monitor event means cached aggregates may already be
+          // stale. Invalidate eagerly; subsequent page loads will recompute once
+          // and share the in-flight result.
+          this.clearReadResultCache()
           if (this.monitorListener) {
             this.monitorListener(payload.type, payload.json)
           }
@@ -72,6 +94,7 @@ export class WcdbService {
           p.reject(new Error(`Worker 错误: ${errorMsg}`))
         }
         this.pending.clear()
+        this.clearReadResultCache()
       })
 
       this.worker.on('exit', (code) => {
@@ -84,6 +107,8 @@ export class WcdbService {
           }
           this.pending.clear()
         }
+        this.clearReadResultCache()
+        this.activeAccountKey = ''
         this.worker = null
       })
 
@@ -105,6 +130,18 @@ export class WcdbService {
    * 发送消息到 Worker 并等待响应
    */
   private callWorker<T>(type: string, payload: any = {}): Promise<T> {
+    if (this.useExportParentBridge) {
+      return new Promise((resolve, reject) => {
+        const id = ++this.messageId
+        this.pending.set(id, { resolve, reject })
+        parentPort!.postMessage({
+          type: 'export:wcdbRequest',
+          requestId: id,
+          method: type,
+          payload
+        })
+      })
+    }
     if (!this.worker) this.initWorker()
     if (!this.worker) return Promise.reject(new Error('WCDB Worker 不可用'))
 
@@ -115,10 +152,65 @@ export class WcdbService {
     })
   }
 
+  /** Main-process endpoint used by export workers to share the existing WCDB
+   * worker and native account handle instead of loading a second dylib instance
+   * in the same process. */
+  invokeWorker<T>(type: string, payload: any = {}): Promise<T> {
+    return this.callWorker<T>(type, payload)
+  }
+
+  private clearReadResultCache(): void {
+    this.readResultCacheGeneration += 1
+    this.readResultCache.clear()
+    this.readResultInFlight.clear()
+  }
+
+  private buildReadResultCacheKey(type: string, payload: unknown): string {
+    return `${type}:${JSON.stringify(payload)}`
+  }
+
+  private callWorkerCached<T>(
+    type: string,
+    payload: any,
+    ttlMs = this.statisticsCacheTtlMs,
+    shouldCache: (value: T) => boolean = (value) => Boolean((value as any)?.success)
+  ): Promise<T> {
+    const cacheKey = this.buildReadResultCacheKey(type, payload)
+    const now = Date.now()
+    const cached = this.readResultCache.get(cacheKey)
+    if (cached && cached.expiresAt > now) {
+      return Promise.resolve(cached.value as T)
+    }
+    if (cached) this.readResultCache.delete(cacheKey)
+
+    const pending = this.readResultInFlight.get(cacheKey)
+    if (pending) return pending as Promise<T>
+
+    const generation = this.readResultCacheGeneration
+    const request = this.callWorker<T>(type, payload)
+      .then((value) => {
+        if (generation === this.readResultCacheGeneration && shouldCache(value)) {
+          this.readResultCache.set(cacheKey, {
+            value,
+            expiresAt: Date.now() + Math.max(1000, ttlMs)
+          })
+        }
+        return value
+      })
+      .finally(() => {
+        this.readResultInFlight.delete(cacheKey)
+      })
+    this.readResultInFlight.set(cacheKey, request)
+    return request
+  }
+
   /**
    * 设置资源路径
    */
   setPaths(resourcesPath: string, userDataPath: string): void {
+    if (this.resourcesPath !== resourcesPath || this.userDataPath !== userDataPath) {
+      this.clearReadResultCache()
+    }
     this.resourcesPath = resourcesPath
     this.userDataPath = userDataPath
     this.callWorker('setPaths', { resourcesPath, userDataPath }).catch(() => { })
@@ -144,7 +236,7 @@ export class WcdbService {
    * 检查服务是否就绪
    */
   isReady(): boolean {
-    return !!this.worker
+    return this.useExportParentBridge || !!this.worker
   }
 
   // ==========================================
@@ -164,7 +256,14 @@ export class WcdbService {
    * @param hexKey 解密密钥
    */
   async open(accountDir: string, hexKey: string): Promise<boolean> {
-    return this.callWorker('open', { accountDir, hexKey })
+    const accountKey = `${accountDir}\u0000${hexKey}`
+    if (this.activeAccountKey !== accountKey) {
+      this.clearReadResultCache()
+    }
+    const opened = await this.callWorker<boolean>('open', { accountDir, hexKey })
+    this.activeAccountKey = opened ? accountKey : ''
+    if (!opened) this.clearReadResultCache()
+    return opened
   }
 
   async getLastInitError(): Promise<string | null> {
@@ -175,6 +274,8 @@ export class WcdbService {
    * 关闭数据库连接
    */
   async close(): Promise<void> {
+    this.activeAccountKey = ''
+    this.clearReadResultCache()
     return this.callWorker('close')
   }
 
@@ -187,6 +288,8 @@ export class WcdbService {
       try { await this.worker.terminate() } catch {}
       this.worker = null
     }
+    this.activeAccountKey = ''
+    this.clearReadResultCache()
   }
 
   /**
@@ -201,11 +304,13 @@ export class WcdbService {
    * 获取会话列表
    */
   async getSessions(): Promise<{ success: boolean; sessions?: any[]; error?: string }> {
-    return this.callWorker('getSessions')
+    return this.callWorkerCached('getSessions', {}, 30 * 1000)
   }
 
   async markAllSessionsRead(): Promise<{ success: boolean; error?: string }> {
-    return this.callWorker('markAllSessionsRead')
+    const result = await this.callWorker<{ success: boolean; error?: string }>('markAllSessionsRead')
+    if (result.success) this.clearReadResultCache()
+    return result
   }
 
   /**
@@ -323,40 +428,40 @@ export class WcdbService {
    * 获取联系人昵称
    */
   async getDisplayNames(usernames: string[]): Promise<{ success: boolean; map?: Record<string, string>; error?: string }> {
-    return this.callWorker('getDisplayNames', { usernames })
+    return this.callWorkerCached('getDisplayNames', { usernames: [...usernames].sort() }, 10 * 60 * 1000)
   }
 
   /**
    * 获取头像 URL
    */
   async getAvatarUrls(usernames: string[]): Promise<{ success: boolean; map?: Record<string, string>; error?: string }> {
-    return this.callWorker('getAvatarUrls', { usernames })
+    return this.callWorkerCached('getAvatarUrls', { usernames: [...usernames].sort() }, 10 * 60 * 1000)
   }
 
   /**
    * 获取群成员数量
    */
   async getGroupMemberCount(chatroomId: string): Promise<{ success: boolean; count?: number; error?: string }> {
-    return this.callWorker('getGroupMemberCount', { chatroomId })
+    return this.callWorkerCached('getGroupMemberCount', { chatroomId }, this.statisticsCacheTtlMs)
   }
 
   /**
    * 批量获取群成员数量
    */
   async getGroupMemberCounts(chatroomIds: string[]): Promise<{ success: boolean; map?: Record<string, number>; error?: string }> {
-    return this.callWorker('getGroupMemberCounts', { chatroomIds })
+    return this.callWorkerCached('getGroupMemberCounts', { chatroomIds: [...chatroomIds].sort() }, this.statisticsCacheTtlMs)
   }
 
   /**
    * 获取群成员列表
    */
   async getGroupMembers(chatroomId: string): Promise<{ success: boolean; members?: any[]; error?: string }> {
-    return this.callWorker('getGroupMembers', { chatroomId })
+    return this.callWorkerCached('getGroupMembers', { chatroomId }, this.statisticsCacheTtlMs)
   }
 
   // 获取群成员群名片昵称
   async getGroupNicknames(chatroomId: string): Promise<{ success: boolean; nicknames?: Record<string, string>; error?: string }> {
-    return this.callWorker('getGroupNicknames', { chatroomId })
+    return this.callWorkerCached('getGroupNicknames', { chatroomId }, this.statisticsCacheTtlMs)
   }
 
   /**
@@ -416,7 +521,7 @@ export class WcdbService {
    * 获取联系人详情
    */
   async getContact(username: string): Promise<{ success: boolean; contact?: any; error?: string }> {
-    return this.callWorker('getContact', { username })
+    return this.callWorkerCached('getContact', { username }, this.statisticsCacheTtlMs)
   }
 
   /**
@@ -431,61 +536,69 @@ export class WcdbService {
   }
 
   async getContactsCompact(usernames: string[] = []): Promise<{ success: boolean; contacts?: any[]; error?: string }> {
-    return this.callWorker('getContactsCompact', { usernames })
+    return this.callWorkerCached('getContactsCompact', { usernames: [...usernames].sort() }, this.statisticsCacheTtlMs)
   }
 
   async getContactAliasMap(usernames: string[]): Promise<{ success: boolean; map?: Record<string, string>; error?: string }> {
-    return this.callWorker('getContactAliasMap', { usernames })
+    return this.callWorkerCached('getContactAliasMap', { usernames: [...usernames].sort() }, this.statisticsCacheTtlMs)
   }
 
   async getContactFriendFlags(usernames: string[]): Promise<{ success: boolean; map?: Record<string, boolean>; error?: string }> {
-    return this.callWorker('getContactFriendFlags', { usernames })
+    return this.callWorkerCached('getContactFriendFlags', { usernames: [...usernames].sort() }, this.statisticsCacheTtlMs)
   }
 
   async getChatRoomExtBuffer(chatroomId: string): Promise<{ success: boolean; extBuffer?: string; error?: string }> {
-    return this.callWorker('getChatRoomExtBuffer', { chatroomId })
+    return this.callWorkerCached('getChatRoomExtBuffer', { chatroomId }, this.statisticsCacheTtlMs)
   }
 
   /**
    * 获取聚合统计数据
    */
-  async getAggregateStats(sessionIds: string[], beginTimestamp: number = 0, endTimestamp: number = 0): Promise<{ success: boolean; data?: any; error?: string }> {
-    return this.callWorker('getAggregateStats', { sessionIds, beginTimestamp, endTimestamp })
+  async getAggregateStats(sessionIds: string[], beginTimestamp: number = 0, endTimestamp: number = 0, bypassCache = false): Promise<{ success: boolean; data?: any; error?: string }> {
+    const payload = { sessionIds: [...sessionIds].sort(), beginTimestamp, endTimestamp }
+    return bypassCache
+      ? this.callWorker('getAggregateStats', payload)
+      : this.callWorkerCached('getAggregateStats', payload, this.statisticsCacheTtlMs, (value: any) => (
+          value?.success === true && value?.data && Number(value.data.total || 0) > 0
+        ))
   }
 
   /**
    * 获取可用年份
    */
   async getAvailableYears(sessionIds: string[]): Promise<{ success: boolean; data?: number[]; error?: string }> {
-    return this.callWorker('getAvailableYears', { sessionIds })
+    const payload = { sessionIds: [...sessionIds].sort() }
+    return this.callWorkerCached('getAvailableYears', payload, 10 * 60 * 1000)
   }
 
   /**
    * 获取年度报告统计
    */
   async getAnnualReportStats(sessionIds: string[], beginTimestamp: number = 0, endTimestamp: number = 0): Promise<{ success: boolean; data?: any; error?: string }> {
-    return this.callWorker('getAnnualReportStats', { sessionIds, beginTimestamp, endTimestamp })
+    const payload = { sessionIds: [...sessionIds].sort(), beginTimestamp, endTimestamp }
+    return this.callWorkerCached('getAnnualReportStats', payload)
   }
 
   /**
    * 获取年度报告扩展数据
    */
   async getAnnualReportExtras(sessionIds: string[], beginTimestamp: number, endTimestamp: number, peakDayBegin: number, peakDayEnd: number): Promise<{ success: boolean; data?: any; error?: string }> {
-    return this.callWorker('getAnnualReportExtras', { sessionIds, beginTimestamp, endTimestamp, peakDayBegin, peakDayEnd })
+    const payload = { sessionIds: [...sessionIds].sort(), beginTimestamp, endTimestamp, peakDayBegin, peakDayEnd }
+    return this.callWorkerCached('getAnnualReportExtras', payload)
   }
 
   /**
    * 获取双人报告统计数据
    */
   async getDualReportStats(sessionId: string, beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; data?: any; error?: string }> {
-    return this.callWorker('getDualReportStats', { sessionId, beginTimestamp, endTimestamp })
+    return this.callWorkerCached('getDualReportStats', { sessionId, beginTimestamp, endTimestamp })
   }
 
   /**
    * 获取群聊统计
    */
   async getGroupStats(chatroomId: string, beginTimestamp: number = 0, endTimestamp: number = 0): Promise<{ success: boolean; data?: any; error?: string }> {
-    return this.callWorker('getGroupStats', { chatroomId, beginTimestamp, endTimestamp })
+    return this.callWorkerCached('getGroupStats', { chatroomId, beginTimestamp, endTimestamp })
   }
 
   async getMyFootprintStats(options: {
@@ -498,7 +611,14 @@ export class WcdbService {
     privateLimit?: number
     mentionMode?: 'text_at_me' | string
   }): Promise<{ success: boolean; data?: any; error?: string }> {
-    return this.callWorker('getMyFootprintStats', { options })
+    const payload = {
+      options: {
+        ...options,
+        privateSessionIds: [...(options.privateSessionIds || [])].sort(),
+        groupSessionIds: [...(options.groupSessionIds || [])].sort()
+      }
+    }
+    return this.callWorkerCached('getMyFootprintStats', payload)
   }
 
   /**
@@ -702,14 +822,18 @@ export class WcdbService {
    * 修改消息内容
    */
   async updateMessage(sessionId: string, localId: number, createTime: number, newContent: string): Promise<{ success: boolean; error?: string }> {
-    return this.callWorker('updateMessage', { sessionId, localId, createTime, newContent })
+    const result = await this.callWorker<{ success: boolean; error?: string }>('updateMessage', { sessionId, localId, createTime, newContent })
+    if (result.success) this.clearReadResultCache()
+    return result
   }
 
   /**
    * 删除消息
    */
   async deleteMessage(sessionId: string, localId: number, createTime: number, dbPathHint?: string): Promise<{ success: boolean; error?: string }> {
-    return this.callWorker('deleteMessage', { sessionId, localId, createTime, dbPathHint })
+    const result = await this.callWorker<{ success: boolean; error?: string }>('deleteMessage', { sessionId, localId, createTime, dbPathHint })
+    if (result.success) this.clearReadResultCache()
+    return result
   }
 
   /**

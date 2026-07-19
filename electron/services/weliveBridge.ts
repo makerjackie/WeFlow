@@ -63,6 +63,9 @@ export interface RunWeliveExportOptions {
   welivePath?: string
   weliveArgsPrefix?: string[]
   signal?: AbortSignal
+  /** Kill a stuck native exporter only when it stops producing output. Active
+   * long-running exports keep extending this deadline with progress events. */
+  inactivityTimeoutMs?: number
   onEvent?: (event: WeliveExportEvent) => void
 }
 
@@ -168,6 +171,8 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
     let stdoutBuffer = ''
     let stderr = ''
     let settled = false
+    let inactivityTimer: NodeJS.Timeout | null = null
+    let forceKillTimer: NodeJS.Timeout | null = null
     let rawResult: WeliveExportEvent | undefined
     let lastEvent: WeliveExportEvent | undefined
     const eventTrail: Array<Record<string, unknown>> = []
@@ -178,8 +183,24 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
     const finish = (result: WeliveExportResult) => {
       if (settled) return
       settled = true
+      if (inactivityTimer) clearTimeout(inactivityTimer)
+      if (forceKillTimer) clearTimeout(forceKillTimer)
       options.signal?.removeEventListener('abort', abort)
       resolve({ ...result, stderr: stderr.trim() || undefined })
+    }
+
+    const inactivityTimeoutMs = Math.max(5000, Number(options.inactivityTimeoutMs || 30_000))
+    const armInactivityTimeout = () => {
+      if (settled) return
+      if (inactivityTimer) clearTimeout(inactivityTimer)
+      inactivityTimer = setTimeout(() => {
+        if (settled) return
+        stderr += `\n[welive-bridge] export timed out after ${inactivityTimeoutMs}ms without progress`
+        child.kill('SIGTERM')
+        forceKillTimer = setTimeout(() => {
+          if (!settled) child.kill('SIGKILL')
+        }, 2000)
+      }, inactivityTimeoutMs)
     }
 
     const abort = () => {
@@ -190,6 +211,7 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
     options.signal?.addEventListener('abort', abort)
 
     const handleEvent = (event: WeliveExportEvent) => {
+      armInactivityTimeout()
       lastEvent = event
       const eventSummary = summarizeEvent(event)
       if (eventSummary) {
@@ -245,12 +267,14 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
 
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => {
+      armInactivityTimeout()
       stdoutBuffer += chunk
       drainStdout()
     })
 
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
+      armInactivityTimeout()
       stderr += chunk
     })
 
@@ -307,6 +331,7 @@ export async function runWeliveExport(options: RunWeliveExportOptions): Promise<
       })
     })
 
+    armInactivityTimeout()
     child.stdin.end(JSON.stringify(options.request))
   })
 }

@@ -4480,13 +4480,7 @@ export class ExportContext {
           )
           if (!cursor.success || !cursor.cursor) {
             console.error(`[Export] 打开游标失败: ${cursor.error || '未知错误'}`)
-            return {
-              rows,
-              memberSet,
-              firstTime,
-              lastTime,
-              error: cursor.error || '打开消息游标失败'
-            }
+            throw new Error(cursor.error || '打开消息游标失败')
           }
 
           try {
@@ -4499,7 +4493,7 @@ export class ExportContext {
               
               if (!batch.success) {
                 console.error(`[Export] 获取批次 ${batchCount} 失败: ${batch.error}`)
-                break
+                throw new Error(batch.error || `获取批次 ${batchCount} 失败`)
               }
               
               if (!batch.rows) break
@@ -4722,6 +4716,7 @@ export class ExportContext {
           } catch (err) {
             if (this.isStopError(err)) throw err
             console.error(`[Export] 收集消息异常:`, err)
+            throw err
           } finally {
             try {
               await wcdbService.closeMessageCursor(cursor.cursor)

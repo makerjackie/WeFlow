@@ -47,15 +47,31 @@ if (parentPort) {
     // can otherwise overlap and reset the handle during lazy database indexing.
     // Keep native work ordered inside this dedicated worker.
     let requestQueue: Promise<void> = Promise.resolve()
+    let messageDbIndexReady = false
+    let activeAccountKey = ''
+
+    const refreshMessageDbIndex = async (): Promise<boolean> => {
+        if (!core.isConnected()) {
+            messageDbIndexReady = false
+            return false
+        }
+        const index = await core.listMessageDbs()
+        messageDbIndexReady = Boolean(index.success && Array.isArray(index.data) && index.data.length > 0)
+        return messageDbIndexReady
+    }
 
     const handleMessage = async (msg: any): Promise<void> => {
         const { id, type, payload } = msg
 
         try {
-            if (MESSAGE_DB_DEPENDENT_REQUESTS.has(type) && core.isConnected()) {
+            // listMessageDbs performs a native discovery scan. Doing it before
+            // every statistics query made page navigation progressively slower
+            // and defeated the caches above this layer. The registry belongs to
+            // the current account handle, so one successful discovery is enough
+            // until that handle is replaced.
+            if (MESSAGE_DB_DEPENDENT_REQUESTS.has(type) && core.isConnected() && !messageDbIndexReady) {
                 for (let attempt = 0; attempt < 3; attempt += 1) {
-                    const index = await core.listMessageDbs()
-                    if (index.success && Array.isArray(index.data) && index.data.length > 0) break
+                    if (await refreshMessageDbIndex()) break
                     if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150))
                 }
             }
@@ -65,6 +81,7 @@ if (parentPort) {
             switch (type) {
                 case 'setPaths':
                     core.setPaths(payload.resourcesPath, payload.userDataPath)
+                    messageDbIndexReady = false
                     result = { success: true }
                     break
                 case 'setLogEnabled':
@@ -84,16 +101,27 @@ if (parentPort) {
                     break
                     }
                 case 'testConnection':
+                    messageDbIndexReady = false
                     result = await core.testConnection(payload.accountDir, payload.hexKey)
                     break
                 case 'open':
+                    {
+                    const nextAccountKey = `${String(payload.accountDir || '')}\u0000${String(payload.hexKey || '')}`
+                    if (nextAccountKey !== activeAccountKey) {
+                        messageDbIndexReady = false
+                    }
                     result = await core.open(payload.accountDir, payload.hexKey)
+                    activeAccountKey = result === true ? nextAccountKey : ''
+                    if (result !== true) messageDbIndexReady = false
                     break
+                    }
                 case 'getLastInitError':
                     result = core.getLastInitError()
                     break
                 case 'close':
                     core.close()
+                    messageDbIndexReady = false
+                    activeAccountKey = ''
                     result = { success: true }
                     break
                 case 'isConnected':
@@ -257,6 +285,7 @@ if (parentPort) {
                     break
                 case 'listMessageDbs':
                     result = await core.listMessageDbs()
+                    messageDbIndexReady = Boolean(result.success && Array.isArray(result.data) && result.data.length > 0)
                     break
                 case 'listMediaDbs':
                     result = await core.listMediaDbs()
@@ -350,6 +379,14 @@ if (parentPort) {
                     break
                 default:
                     result = { success: false, error: `Unknown method: ${type}` }
+            }
+
+            if (
+                MESSAGE_DB_DEPENDENT_REQUESTS.has(type) &&
+                result?.success === false &&
+                /(?:status\s*)?-3\b|消息数据库(?:未找到|为空)/i.test(String(result?.error || ''))
+            ) {
+                messageDbIndexReady = false
             }
 
             parentPort!.postMessage({ id, result })

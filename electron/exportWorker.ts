@@ -144,9 +144,14 @@ if (config.userDataPath) {
   process.env.WEFLOW_CONFIG_CWD = config.userDataPath
 }
 process.env.WEFLOW_PROJECT_NAME = process.env.WEFLOW_PROJECT_NAME || 'WeFlow'
+// worker_threads share a process with Electron's main thread. Loading another
+// copy of the native WCDB service here lets its global init/shutdown state reset
+// the main chat connection. Route compatibility-export reads through the
+// already connected main-process WCDB worker instead.
+process.env.WEFLOW_EXPORT_PARENT_WCDB = '1'
 
-// 消息导出强制走 WeLive 引擎（不提供 legacy 回退开关）；
-// 仅联系人导出仍由 worker 内置流程处理。
+// 消息导出优先走 WeLive 引擎；当原生 JSONL 游标在个别会话上失效时，
+// 自动回退到内置 WCDB 导出，避免一个原生兼容性错误阻断整个导出任务。
 const shouldUseWeliveEngine = () => config.mode !== 'contacts'
 
 const normalizeImageXorKey = (value: unknown): string | number | undefined => {
@@ -253,10 +258,10 @@ const collectWeliveErrorText = (result: any): string => {
     .join('\n')
 }
 
-const isWeliveNativeCrashResult = (result: any): boolean => {
+const shouldFallbackFromWeliveResult = (result: any): boolean => {
   if (!result || result.success) return false
   const text = collectWeliveErrorText(result)
-  return /3221225477|0x?c0000005|-1073741819/i.test(text)
+  return /3221225477|0x?c0000005|-1073741819|native jsonl export failed with status\s*-3|cursor state failed|export timed out|without progress/i.test(text)
 }
 
 async function runWeliveEngine() {
@@ -296,6 +301,10 @@ async function runWeliveEngine() {
     ? { ...normalizedOptions, exportVoiceAsText: false }
     : normalizedOptions
   await exportService.context.ensureConnected().catch(() => null)
+  const knownSessionsResult = await wcdbService.getSessions().catch(() => null)
+  const knownSessionIds = knownSessionsResult?.success && Array.isArray(knownSessionsResult.sessions)
+    ? new Set(knownSessionsResult.sessions.map((item: any) => String(item?.username || '').trim()).filter(Boolean))
+    : null
   const exportMediaEnabled = exportService.context.isMediaExportEnabled(effectiveOptions)
   const writeLayout = exportService.context.resolveExportWriteLayout(effectiveOptions)
   const exportBaseDir = writeLayout === 'A'
@@ -359,6 +368,11 @@ async function runWeliveEngine() {
 
   for (let index = 0; index < sessionIds.length; index++) {
     const sessionId = sessionIds[index]
+    if (knownSessionIds && knownSessionIds.size > 0 && !knownSessionIds.has(sessionId)) {
+      failedSessionIds.push(sessionId)
+      failedSessionErrors[sessionId] = '该会话没有可导出的聊天记录'
+      continue
+    }
     const result = await runWeliveExport({
       resourcesPath: String(config.resourcesPath || ''),
       appPath: config.resourcesPath ? path.dirname(config.resourcesPath) : __dirname,
@@ -556,7 +570,13 @@ async function runLegacyEngine() {
     result = await exportService.exportSessions(
       Array.isArray(config.sessionIds) ? config.sessionIds : [],
       String(config.outputDir || ''),
-      config.options || { format: 'json' },
+      {
+        ...(config.options || { format: 'json' }),
+        // The compatibility path shares one native WCDB account handle. Keep a
+        // complete cursor lifecycle exclusive so separate sessions cannot
+        // invalidate each other's cursor state.
+        exportConcurrency: 1
+      },
       onProgress,
       taskControl
     )
@@ -574,7 +594,7 @@ async function runLegacyEngine() {
 async function run() {
   if (shouldUseWeliveEngine()) {
     const result = await runWeliveEngine()
-    if (!isWeliveNativeCrashResult(result)) {
+    if (!shouldFallbackFromWeliveResult(result)) {
       flushProgress()
       flushCreatedPaths()
       parentPort?.postMessage({
@@ -588,7 +608,7 @@ async function run() {
       current: 0,
       total: Array.isArray(config.sessionIds) ? config.sessionIds.length : 1,
       phase: 'preparing',
-      phaseLabel: 'WeLive 导出引擎异常退出，正在切换兼容导出引擎'
+      phaseLabel: '原生导出游标不可用，正在切换兼容导出引擎'
     })
     flushProgress()
     flushCreatedPaths()

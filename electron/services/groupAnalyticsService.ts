@@ -84,6 +84,9 @@ class GroupAnalyticsService {
     string,
     Promise<{ success: boolean; data?: GroupMembersPanelEntry[]; error?: string; fromCache?: boolean; updatedAt?: number }>
   >()
+  private readonly groupChatsCacheTtlMs = 5 * 60 * 1000
+  private groupChatsCache: { scope: string; updatedAt: number; data: GroupChatInfo[] } | null = null
+  private groupChatsInFlight: { scope: string; promise: Promise<{ success: boolean; data?: GroupChatInfo[]; error?: string }> } | null = null
   private readonly friendExcludeNames = new Set(['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage'])
 
   constructor() {
@@ -1065,6 +1068,34 @@ class GroupAnalyticsService {
   }
 
   async getGroupChats(): Promise<{ success: boolean; data?: GroupChatInfo[]; error?: string }> {
+    const scope = `${String(this.configService.get('dbPath') || '')}::${this.cleanAccountDirName(String(this.configService.get('myWxid') || ''))}`
+    const cached = this.groupChatsCache
+    if (cached && cached.scope === scope && Date.now() - cached.updatedAt <= this.groupChatsCacheTtlMs) {
+      return { success: true, data: cached.data.map((group) => ({ ...group })) }
+    }
+    if (this.groupChatsInFlight?.scope === scope) {
+      const result = await this.groupChatsInFlight.promise
+      return result.data ? { ...result, data: result.data.map((group) => ({ ...group })) } : result
+    }
+
+    const promise = this.getGroupChatsFresh()
+    this.groupChatsInFlight = { scope, promise }
+    try {
+      const result = await promise
+      if (result.success && result.data) {
+        this.groupChatsCache = {
+          scope,
+          updatedAt: Date.now(),
+          data: result.data.map((group) => ({ ...group }))
+        }
+      }
+      return result.data ? { ...result, data: result.data.map((group) => ({ ...group })) } : result
+    } finally {
+      if (this.groupChatsInFlight?.promise === promise) this.groupChatsInFlight = null
+    }
+  }
+
+  private async getGroupChatsFresh(): Promise<{ success: boolean; data?: GroupChatInfo[]; error?: string }> {
     try {
       const conn = await this.ensureConnected()
       if (!conn.success) return { success: false, error: conn.error }
@@ -1246,23 +1277,15 @@ class GroupAnalyticsService {
         if (pending) return pending
       }
 
-      const requestPromise = (async () => {
+      // Keep the underlying load alive after the UI timeout. Very large groups
+      // can need more than one render budget on the first visit; once that work
+      // finishes, the next visit should use the completed cache instead of
+      // starting the same native/contact queries again.
+      const freshPromise = (async () => {
         const conn = await this.ensureConnected()
         if (!conn.success) return { success: false, error: conn.error }
 
-        const timeoutMs = includeMessageCounts
-          ? this.groupMembersPanelFullTimeoutMs
-          : this.groupMembersPanelMembersTimeoutMs
-        const fresh = await this.withPromiseTimeout(
-          this.loadGroupMembersPanelDataFresh(normalizedChatroomId, includeMessageCounts),
-          timeoutMs,
-          {
-            success: false,
-            error: includeMessageCounts
-              ? '群成员发言统计加载超时，请稍后重试'
-              : '群成员列表加载超时，请稍后重试'
-          }
-        )
+        const fresh = await this.loadGroupMembersPanelDataFresh(normalizedChatroomId, includeMessageCounts)
         if (!fresh.success || !fresh.data) {
           return { success: false, error: fresh.error || '获取群成员面板数据失败' }
         }
@@ -1271,12 +1294,28 @@ class GroupAnalyticsService {
         this.groupMembersPanelCache.set(cacheKey, { updatedAt, data: fresh.data })
         this.pruneGroupMembersPanelCache()
         return { success: true, data: fresh.data, fromCache: false, updatedAt }
-      })().finally(() => {
-        this.groupMembersPanelInFlight.delete(cacheKey)
-      })
+      })()
 
-      this.groupMembersPanelInFlight.set(cacheKey, requestPromise)
-      return await requestPromise
+      this.groupMembersPanelInFlight.set(cacheKey, freshPromise)
+      void freshPromise.finally(() => {
+        if (this.groupMembersPanelInFlight.get(cacheKey) === freshPromise) {
+          this.groupMembersPanelInFlight.delete(cacheKey)
+        }
+      }).catch(() => {})
+
+      const timeoutMs = includeMessageCounts
+        ? this.groupMembersPanelFullTimeoutMs
+        : this.groupMembersPanelMembersTimeoutMs
+      return await this.withPromiseTimeout(
+        freshPromise,
+        timeoutMs,
+        {
+          success: false,
+          error: includeMessageCounts
+            ? '群成员发言统计仍在后台加载，请稍后重试'
+            : '群成员列表仍在后台加载，请稍后重试'
+        }
+      )
     } catch (e) {
       return { success: false, error: String(e) }
     }

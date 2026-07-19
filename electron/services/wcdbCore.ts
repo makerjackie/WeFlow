@@ -2,6 +2,7 @@ import { join, dirname, basename } from 'path'
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 import { appendFile } from 'fs/promises'
 import { tmpdir } from 'os'
+import { createHash } from 'crypto'
 import * as fzstd from 'fzstd'
 import { expandHomePath } from '../utils/pathUtils'
 
@@ -180,6 +181,16 @@ export class WcdbCore {
   private lastCursorForceReopenAt = 0
   private nextSyntheticMessageCursor = -1
   private syntheticMessageCursors = new Map<number, {
+    sessionId: string
+    batchSize: number
+    ascending: boolean
+    beginTimestamp: number
+    endTimestamp: number
+    offset: number
+    bufferedRows?: any[]
+    bufferedOffset: number
+  }>()
+  private nativeMessageCursorStates = new Map<number, {
     sessionId: string
     batchSize: number
     ascending: boolean
@@ -1958,6 +1969,7 @@ export class WcdbCore {
 
   close(): void {
     this.syntheticMessageCursors.clear()
+    this.nativeMessageCursorStates.clear()
     if (this.handle !== null || this.initialized) {
       // 先停止监控与云控回调，避免 shutdown 后仍有 native 回调访问已释放资源。
       try { this.stopMonitor() } catch {}
@@ -3911,6 +3923,7 @@ export class WcdbCore {
     const wxid = this.currentWxid
     this.writeLog('forceReopen: clearing cached handle and reopening...', true)
     this.syntheticMessageCursors.clear()
+    this.nativeMessageCursorStates.clear()
     // 清空缓存状态，让 open() 真正重新打开
     try { this.wcdbShutdown() } catch { }
     this.handle = null
@@ -3971,6 +3984,91 @@ export class WcdbCore {
     })
   }
 
+  private listMessageDbsFromFilesystem(): string[] {
+    const dbStoragePath = this.currentDbStoragePath || this.resolveDbStoragePath(
+      this.currentPath || '',
+      this.currentWxid || ''
+    )
+    if (!dbStoragePath) return []
+    const messageDirs = [join(dbStoragePath, 'message'), join(dbStoragePath, 'Message')]
+    for (const messageDir of messageDirs) {
+      if (!existsSync(messageDir)) continue
+      try {
+        return readdirSync(messageDir)
+          .filter((name) => /^(?:biz_)?message(?:_\d+)?\.db$/i.test(name) && this.isRealDbFileName(name))
+          .map((name) => join(messageDir, name))
+          .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+      } catch {
+        // Try the alternate casing below.
+      }
+    }
+    return []
+  }
+
+  private quoteSqlIdentifier(value: string): string {
+    return `"${String(value || '').replace(/"/g, '""')}"`
+  }
+
+  private async loadMessageRowsFromTables(state: {
+    sessionId: string
+    ascending: boolean
+    beginTimestamp: number
+    endTimestamp: number
+  }): Promise<{ success: boolean; rows?: any[]; error?: string }> {
+    const sessionHash = createHash('md5').update(state.sessionId).digest('hex').toLowerCase()
+    const acceptedSuffixes = new Set([sessionHash, sessionHash.slice(0, 16)])
+    const dbPaths = this.listMessageDbsFromFilesystem()
+    if (dbPaths.length === 0) {
+      return { success: false, error: '兼容扫描未找到消息数据库' }
+    }
+
+    const rows: any[] = []
+    let matchedTables = 0
+    let lastError = ''
+    const queryBatchSize = 5000
+    for (const dbPath of dbPaths) {
+      const tablesResult = await this.listTables('message', dbPath)
+      if (!tablesResult.success || !Array.isArray(tablesResult.tables)) {
+        lastError = tablesResult.error || lastError
+        continue
+      }
+      const tableNames = tablesResult.tables.filter((tableName) => {
+        const normalized = String(tableName || '').trim().toLowerCase()
+        return normalized.startsWith('msg_') && acceptedSuffixes.has(normalized.slice(4))
+      })
+      for (const tableName of tableNames) {
+        matchedTables += 1
+        let offset = 0
+        while (true) {
+          const sql = `SELECT * FROM ${this.quoteSqlIdentifier(tableName)} LIMIT ${queryBatchSize} OFFSET ${offset}`
+          const queryResult = await this.execQuery('message', dbPath, sql)
+          if (!queryResult.success || !Array.isArray(queryResult.rows)) {
+            lastError = queryResult.error || lastError
+            break
+          }
+          const pageRows = this.filterSyntheticCursorRows(queryResult.rows, state)
+          rows.push(...pageRows)
+          if (queryResult.rows.length < queryBatchSize) break
+          offset += queryResult.rows.length
+        }
+      }
+    }
+
+    if (matchedTables === 0) {
+      return { success: false, error: lastError || '兼容扫描未找到会话消息表' }
+    }
+    rows.sort((a, b) => {
+      const direction = state.ascending ? 1 : -1
+      const timeDelta = this.getCursorRowTimestamp(a) - this.getCursorRowTimestamp(b)
+      if (timeDelta !== 0) return timeDelta * direction
+      const localIdDelta = Number(a?.local_id ?? a?.localId ?? a?.WCDB_CT_local_id ?? 0) -
+        Number(b?.local_id ?? b?.localId ?? b?.WCDB_CT_local_id ?? 0)
+      return localIdDelta * direction
+    })
+    this.writeLog(`direct table cursor loaded session=${state.sessionId} rows=${rows.length} tables=${matchedTables}`, true)
+    return { success: true, rows }
+  }
+
   private async loadSyntheticAscendingRows(state: {
     sessionId: string
     batchSize: number
@@ -3982,8 +4080,13 @@ export class WcdbCore {
     let offset = 0
     while (true) {
       const page = await this.getMessages(state.sessionId, pageSize, offset)
-      if (!page.success) return { success: false, error: page.error || '兼容分页读取失败' }
+      if (!page.success) {
+        return this.loadMessageRowsFromTables({ ...state, ascending: true })
+      }
       const pageRows = Array.isArray(page.messages) ? page.messages : []
+      if (offset === 0 && pageRows.length === 0) {
+        return this.loadMessageRowsFromTables({ ...state, ascending: true })
+      }
       rows.push(...this.filterSyntheticCursorRows(pageRows, state))
       offset += pageRows.length
       if (pageRows.length < pageSize) break
@@ -4058,6 +4161,15 @@ export class WcdbCore {
             : `创建游标失败: ${result}，请查看日志`
         return { success: false, error: hint }
       }
+      this.nativeMessageCursorStates.set(outCursor[0], {
+        sessionId,
+        batchSize: Math.max(1, Math.floor(batchSize || 500)),
+        ascending,
+        beginTimestamp: this.normalizeTimestamp(beginTimestamp),
+        endTimestamp: this.normalizeTimestamp(endTimestamp),
+        offset: 0,
+        bufferedOffset: 0
+      })
       return { success: true, cursor: outCursor[0] }
     } catch (e) {
       await this.printLogs(true)
@@ -4086,8 +4198,24 @@ export class WcdbCore {
           return { success: true, rows, hasMore: end < synthetic.bufferedRows.length }
         }
 
+        if (synthetic.bufferedRows) {
+          const start = synthetic.bufferedOffset
+          const end = Math.min(synthetic.bufferedRows.length, start + synthetic.batchSize)
+          const rows = synthetic.bufferedRows.slice(start, end)
+          synthetic.bufferedOffset = end
+          return { success: true, rows, hasMore: end < synthetic.bufferedRows.length }
+        }
+
         const page = await this.getMessages(synthetic.sessionId, synthetic.batchSize, synthetic.offset)
-        if (!page.success) return { success: false, error: page.error || '兼容分页读取失败' }
+        if (!page.success || (synthetic.offset === 0 && (!page.messages || page.messages.length === 0))) {
+          const loaded = await this.loadMessageRowsFromTables(synthetic)
+          if (!loaded.success) return { success: false, error: loaded.error || page.error || '兼容分页读取失败' }
+          synthetic.bufferedRows = loaded.rows || []
+          const end = Math.min(synthetic.bufferedRows.length, synthetic.batchSize)
+          const rows = synthetic.bufferedRows.slice(0, end)
+          synthetic.bufferedOffset = end
+          return { success: true, rows, hasMore: end < synthetic.bufferedRows.length }
+        }
         const rawRows = Array.isArray(page.messages) ? page.messages : []
         synthetic.offset += rawRows.length
         return {
@@ -4095,6 +4223,15 @@ export class WcdbCore {
           rows: this.filterSyntheticCursorRows(rawRows, synthetic),
           hasMore: rawRows.length === synthetic.batchSize
         }
+      }
+
+      const nativeState = this.nativeMessageCursorStates.get(cursor)
+      if (nativeState?.bufferedRows) {
+        const start = nativeState.bufferedOffset
+        const end = Math.min(nativeState.bufferedRows.length, start + nativeState.batchSize)
+        const rows = nativeState.bufferedRows.slice(start, end)
+        nativeState.bufferedOffset = end
+        return { success: true, rows, hasMore: end < nativeState.bufferedRows.length }
       }
 
       const outPtr = [null as any]
@@ -4106,6 +4243,17 @@ export class WcdbCore {
       const jsonStr = this.decodeJsonPtr(outPtr[0])
       if (!jsonStr) return { success: false, error: '解析批次失败' }
       const rows = this.parseMessageJson(jsonStr)
+      if (nativeState && nativeState.offset === 0 && Array.isArray(rows) && rows.length === 0) {
+        const loaded = await this.loadMessageRowsFromTables(nativeState)
+        if (loaded.success && Array.isArray(loaded.rows) && loaded.rows.length > 0) {
+          nativeState.bufferedRows = loaded.rows
+          const end = Math.min(nativeState.bufferedRows.length, nativeState.batchSize)
+          const fallbackRows = nativeState.bufferedRows.slice(0, end)
+          nativeState.bufferedOffset = end
+          return { success: true, rows: fallbackRows, hasMore: end < nativeState.bufferedRows.length }
+        }
+      }
+      if (nativeState && Array.isArray(rows)) nativeState.offset += rows.length
       return { success: true, rows, hasMore: outHasMore[0] === 1 }
     } catch (e) {
       return { success: false, error: String(e) }
@@ -4120,6 +4268,7 @@ export class WcdbCore {
       if (this.syntheticMessageCursors.delete(cursor)) {
         return { success: true }
       }
+      this.nativeMessageCursorStates.delete(cursor)
       const result = this.wcdbCloseMessageCursor(this.handle, cursor)
       if (result !== 0) {
         return { success: false, error: `关闭游标失败: ${result}` }
@@ -4272,23 +4421,15 @@ export class WcdbCore {
     try {
       const outPtr = [null as any]
       const result = this.wcdbListMessageDbs(this.handle, outPtr)
-      if (result !== 0 || !outPtr[0]) return { success: false, error: `获取消息库列表失败: ${result}` }
-      const jsonStr = this.decodeJsonPtr(outPtr[0])
-      if (!jsonStr) return { success: false, error: '解析消息库列表失败' }
-      let data = JSON.parse(jsonStr)
-      if (!Array.isArray(data) || data.length === 0) {
-        const dbStoragePath = this.currentDbStoragePath || this.resolveDbStoragePath(
-          this.currentPath || '',
-          this.currentWxid || ''
-        )
-        const messageDir = dbStoragePath ? join(dbStoragePath, 'Message') : ''
-        if (messageDir && existsSync(messageDir)) {
-          data = readdirSync(messageDir)
-            .filter((name) => /^(?:biz_)?message(?:_\d+)?\.db$/i.test(name) && this.isRealDbFileName(name))
-            .map((name) => join(messageDir, name))
-            .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
-        }
+      let data: any[] = []
+      if (result === 0 && outPtr[0]) {
+        const jsonStr = this.decodeJsonPtr(outPtr[0])
+        if (jsonStr) data = JSON.parse(jsonStr)
       }
+      if (!Array.isArray(data) || data.length === 0) {
+        data = this.listMessageDbsFromFilesystem()
+      }
+      if (data.length === 0 && result !== 0) return { success: false, error: `获取消息库列表失败: ${result}` }
       return { success: true, data }
     } catch (e) {
       return { success: false, error: String(e) }

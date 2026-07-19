@@ -1,5 +1,5 @@
-import React, { memo } from 'react'
-import { CheckCircle2, XCircle, Loader2, PlayCircle, PauseCircle, Trash2, StopCircle } from 'lucide-react'
+import React, { memo, useState } from 'react'
+import { Check, CheckCircle2, Copy, XCircle, Loader2, PlayCircle, PauseCircle, Trash2, StopCircle } from 'lucide-react'
 import type { ExportTask } from '../../types'
 import type { BackgroundTaskRecord } from '../../../../types/backgroundTask'
 import {
@@ -48,6 +48,7 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   onCancelBackgroundTask,
   onClearCompletedBackgroundTasks
 }) => {
+  const [copiedErrorTaskId, setCopiedErrorTaskId] = useState<string | null>(null)
   const hasTasks = exportTasks.length > 0 || backgroundTasks.length > 0
   
   if (!hasTasks) return null
@@ -59,6 +60,27 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   const handleClearCompletedTasks = () => {
     onClearCompletedExportTasks()
     onClearCompletedBackgroundTasks()
+  }
+
+  const handleCopyError = async (taskId: string, error: string) => {
+    try {
+      await navigator.clipboard.writeText(error)
+    } catch {
+      const textarea = document.createElement('textarea')
+      textarea.value = error
+      textarea.setAttribute('readonly', '')
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      textarea.remove()
+    }
+
+    setCopiedErrorTaskId(taskId)
+    window.setTimeout(() => {
+      setCopiedErrorTaskId((current) => current === taskId ? null : current)
+    }, 1800)
   }
 
   return (
@@ -115,7 +137,21 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
                 {!labelAlreadyHasCount && <span className="count">{countText}</span>}
               </div>
               
-              {task.error && <div className="task-error-msg">{task.error}</div>}
+              {task.error && (
+                <div className="task-error-panel">
+                  <div className="task-error-msg">{task.error}</div>
+                  <button
+                    type="button"
+                    className="copy-error-btn"
+                    onClick={() => void handleCopyError(task.id, task.error || '')}
+                    title="复制错误信息"
+                    aria-label="复制错误信息"
+                  >
+                    {copiedErrorTaskId === task.id ? <Check size={13} /> : <Copy size={13} />}
+                    {copiedErrorTaskId === task.id ? '已复制' : '复制'}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
           )

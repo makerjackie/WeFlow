@@ -152,7 +152,7 @@ process.env.WEFLOW_EXPORT_PARENT_WCDB = '1'
 
 // 消息导出优先走 WeLive 引擎；当原生 JSONL 游标在个别会话上失效时，
 // 自动回退到内置 WCDB 导出，避免一个原生兼容性错误阻断整个导出任务。
-const shouldUseWeliveEngine = () => config.mode !== 'contacts'
+const shouldUseWeliveEngine = () => config.mode !== 'contacts' && config.options?.forceLegacyEngine !== true
 
 const normalizeImageXorKey = (value: unknown): string | number | undefined => {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -261,7 +261,7 @@ const collectWeliveErrorText = (result: any): string => {
 const shouldFallbackFromWeliveResult = (result: any): boolean => {
   if (!result || result.success) return false
   const text = collectWeliveErrorText(result)
-  return /3221225477|0x?c0000005|-1073741819|native jsonl export failed with status\s*-3|cursor state failed|export timed out|without progress/i.test(text)
+  return /3221225477|0x?c0000005|-1073741819|native jsonl export failed with status\s*-3|cursor state failed|QueryMessageBatch\s+no rows|WeLive 原始导出数据不完整|JSON 解析失败|Unterminated string in JSON|export timed out|without progress/i.test(text)
 }
 
 async function runWeliveEngine() {

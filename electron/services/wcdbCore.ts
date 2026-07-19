@@ -1893,6 +1893,20 @@ export class WcdbCore {
       this.startPeriodicPurge()
       this.writeLog(`open ok handle=${handle}`, true)
       await this.dumpDbStatus('open')
+
+      // Message databases are discovered lazily by the native service. Session
+      // and contact queries already work before discovery, which made analytics
+      // and export receive successful-looking zero counts on a fresh connection.
+      // Force the discovery handshake once here so every caller of open() sees a
+      // fully initialized account, regardless of which page is opened first.
+      const messageDbs = await this.listMessageDbs()
+      if (messageDbs.success) {
+        this.writeLog(`[diag:open] message db index ready count=${messageDbs.data?.length || 0}`, true)
+      } else {
+        this.writeLog(`[diag:open] message db index failed: ${messageDbs.error || 'unknown'}`, true)
+      }
+      await this.dumpDbStatus('open-message-index')
+
       await this.runPostOpenDiagnostics(accountDir, dbStoragePath, sessionDbPath, wxid)
       return true
     } catch (e) {

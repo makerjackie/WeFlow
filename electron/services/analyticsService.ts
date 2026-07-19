@@ -471,7 +471,10 @@ class AnalyticsService {
     // 尝试从文件加载缓存
     if (!force) {
       const fileCache = await this.loadCacheFromFile()
-      if (fileCache && fileCache.key === cacheKey) {
+      // A zero aggregate may have been persisted while the native message index
+      // was still empty. Do not let that poisoned cache suppress a real scan on
+      // the next launch.
+      if (fileCache && fileCache.key === cacheKey && Number(fileCache.data?.total || 0) > 0) {
         this.aggregateCache = fileCache
         return { success: true, data: fileCache.data, source: 'file-cache' }
       }

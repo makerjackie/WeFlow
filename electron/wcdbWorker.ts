@@ -3,11 +3,63 @@ import { WcdbCore } from './services/wcdbCore'
 
 const core = new WcdbCore()
 
+// The native layer populates its message database registry lazily. Keep the
+// refresh and the dependent operation in the same queued job so no contact,
+// media, or second open request can run between them.
+const MESSAGE_DB_DEPENDENT_REQUESTS = new Set([
+    'getMessages',
+    'getNewMessages',
+    'getMessageCount',
+    'getMessageByServerId',
+    'getMessageCounts',
+    'getSessionMessageCounts',
+    'getSessionMessageTypeStats',
+    'getSessionMessageTypeStatsBatch',
+    'getSessionMessageDateCounts',
+    'getSessionMessageDateCountsBatch',
+    'getMessagesByType',
+    'getMediaStream',
+    'getMessageTables',
+    'getMessageTableStats',
+    'getMessageDates',
+    'getAggregateStats',
+    'getAvailableYears',
+    'getAnnualReportStats',
+    'getAnnualReportExtras',
+    'getDualReportStats',
+    'getGroupStats',
+    'getMyFootprintStats',
+    'openMessageCursor',
+    'getMessageById',
+    'searchMessages',
+    'getVoiceData',
+    'getVoiceDataBatch',
+    'checkMessageAntiRevokeTriggers',
+    'installMessageAntiRevokeTriggers',
+    'uninstallMessageAntiRevokeTriggers',
+    'updateMessage',
+    'deleteMessage'
+])
+
 if (parentPort) {
-    parentPort.on('message', async (msg) => {
+    // Every request shares one native account handle. Some core operations yield
+    // to the event loop while opening or paging, so independent message handlers
+    // can otherwise overlap and reset the handle during lazy database indexing.
+    // Keep native work ordered inside this dedicated worker.
+    let requestQueue: Promise<void> = Promise.resolve()
+
+    const handleMessage = async (msg: any): Promise<void> => {
         const { id, type, payload } = msg
 
         try {
+            if (MESSAGE_DB_DEPENDENT_REQUESTS.has(type) && core.isConnected()) {
+                for (let attempt = 0; attempt < 3; attempt += 1) {
+                    const index = await core.listMessageDbs()
+                    if (index.success && Array.isArray(index.data) && index.data.length > 0) break
+                    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150))
+                }
+            }
+
             let result: any
 
             switch (type) {
@@ -304,5 +356,14 @@ if (parentPort) {
         } catch (e) {
             parentPort!.postMessage({ id, error: String(e) })
         }
+    }
+
+    parentPort.on('message', (msg) => {
+        requestQueue = requestQueue
+            .then(() => handleMessage(msg))
+            .catch((error) => {
+                const id = Number(msg?.id || 0)
+                parentPort!.postMessage({ id, error: String(error) })
+            })
     })
 }

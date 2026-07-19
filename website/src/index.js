@@ -1,4 +1,5 @@
 const LATEST_DOWNLOAD = '/download/WeFlow-5.0.7-Setup.dmg'
+const LATEST_DOWNLOAD_URL = `${LATEST_DOWNLOAD}?v=5.0.7`
 
 const RELEASES = new Map([
   [LATEST_DOWNLOAD, {
@@ -46,12 +47,21 @@ export default {
     const url = new URL(request.url)
 
     if (url.pathname === '/download/latest') {
-      return Response.redirect(new URL(LATEST_DOWNLOAD, url.origin), 302)
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: new URL(LATEST_DOWNLOAD_URL, url.origin).toString(),
+          'cache-control': 'no-store'
+        }
+      })
     }
 
     const release = RELEASES.get(url.pathname)
     if (!release) {
-      return new Response('Not found', { status: 404 })
+      return new Response('Not found', {
+        status: 404,
+        headers: { 'cache-control': 'no-store' }
+      })
     }
 
     if (request.method === 'HEAD') {

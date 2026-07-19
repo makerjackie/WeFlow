@@ -1964,11 +1964,17 @@ class ChatService {
     if (!nativeResult.success || !nativeResult.counts) {
       return { success: false, error: nativeResult.error || '获取会话消息总数失败', dbSignature }
     }
-    const counts = normalizedSessionIds.reduce<Record<string, number>>((acc, sid) => {
-      const raw = nativeResult.counts?.[sid]
-      acc[sid] = Number.isFinite(raw) ? Math.max(0, Math.floor(Number(raw))) : 0
-      return acc
-    }, {})
+    const counts: Record<string, number> = {}
+    for (const sessionId of normalizedSessionIds) {
+      if (!Object.prototype.hasOwnProperty.call(nativeResult.counts, sessionId)) {
+        return { success: false, error: `会话消息总数结果不完整: ${sessionId}`, dbSignature }
+      }
+      const raw = nativeResult.counts[sessionId]
+      if (!Number.isFinite(raw)) {
+        return { success: false, error: `会话消息总数无效: ${sessionId}`, dbSignature }
+      }
+      counts[sessionId] = Math.max(0, Math.floor(Number(raw)))
+    }
 
     this.logExportDiag({
       traceId,
@@ -2076,16 +2082,23 @@ class ChatService {
         if (cachedBatchFresh && cachedBatch.sessionIdsKey === sessionIdsKey) {
           const snapshot = await this.getMessageDbCountSnapshot()
           if (snapshot.success && snapshot.dbSignature === cachedBatch.dbSignature) {
-            for (const sessionId of pendingSessionIds) {
-              const nextCountRaw = cachedBatch.counts[sessionId]
-              const nextCount = Number.isFinite(nextCountRaw) ? Math.max(0, Math.floor(nextCountRaw)) : 0
-              counts[sessionId] = nextCount
-              this.sessionMessageCountCache.set(sessionId, {
-                count: nextCount,
-                updatedAt: now
-              })
+            const cacheIsComplete = pendingSessionIds.every((sessionId) => (
+              Object.prototype.hasOwnProperty.call(cachedBatch.counts, sessionId) &&
+              Number.isFinite(cachedBatch.counts[sessionId])
+            ))
+            if (cacheIsComplete) {
+              for (const sessionId of pendingSessionIds) {
+                const nextCount = Math.max(0, Math.floor(Number(cachedBatch.counts[sessionId])))
+                counts[sessionId] = nextCount
+                this.sessionMessageCountCache.set(sessionId, {
+                  count: nextCount,
+                  updatedAt: now
+                })
+              }
+              tableScanSucceeded = true
+            } else {
+              this.sessionMessageCountBatchCache = null
             }
-            tableScanSucceeded = true
           }
         }
 
@@ -2143,20 +2156,33 @@ class ChatService {
                 batchSize: batch.length
               }
             })
-            let batchCounts: Record<string, number> = {}
+            let batchResult: { success: boolean; counts?: Record<string, number>; error?: string }
             try {
-              const result = await wcdbService.getMessageCounts(batch)
-              if (result.success && result.counts) {
-                batchCounts = result.counts
-              }
-            } catch {
-              // noop
+              batchResult = await wcdbService.getMessageCounts(batch)
+            } catch (error) {
+              const message = `逐会话统计消息总数失败: ${String(error)}`
+              errorMessage = message
+              return { success: false, error: message }
+            }
+            if (!batchResult.success || !batchResult.counts) {
+              const message = batchResult.error || '逐会话统计消息总数失败'
+              errorMessage = message
+              return { success: false, error: message }
+            }
+            const batchCounts = batchResult.counts
+            const invalidSessionId = batch.find((sessionId) => (
+              !Object.prototype.hasOwnProperty.call(batchCounts, sessionId) ||
+              !Number.isFinite(batchCounts[sessionId])
+            ))
+            if (invalidSessionId) {
+              const message = `逐会话统计结果不完整: ${invalidSessionId}`
+              errorMessage = message
+              return { success: false, error: message }
             }
 
             const nowTs = Date.now()
             for (const sessionId of batch) {
-              const nextCountRaw = batchCounts[sessionId]
-              const nextCount = Number.isFinite(nextCountRaw) ? Math.max(0, Math.floor(nextCountRaw)) : 0
+              const nextCount = Math.max(0, Math.floor(Number(batchCounts[sessionId])))
               counts[sessionId] = nextCount
               this.sessionMessageCountCache.set(sessionId, {
                 count: nextCount,
@@ -4738,12 +4764,26 @@ class ChatService {
     if (!this.sessionStatsCacheScope) return
 
     const normalizedType = String(type || '').toLowerCase()
-    if (
+    const invalidatesMessageCounts = (
       normalizedType.includes('message') ||
       normalizedType.includes('session') ||
       normalizedType.includes('db')
-    ) {
+    )
+    if (invalidatesMessageCounts) {
       this.messageDbCountSnapshotCache = null
+      this.sessionMessageCountCache.clear()
+      this.sessionMessageCountHintCache.clear()
+      this.sessionMessageCountBatchCache = null
+      this.sessionDetailFastCache.clear()
+      this.sessionDetailExtraCache.clear()
+    }
+    if (
+      invalidatesMessageCounts ||
+      normalizedType.includes('group') ||
+      normalizedType.includes('member') ||
+      normalizedType.includes('contact')
+    ) {
+      this.myFootprintStatsCache.clear()
     }
     const maybeJson = String(json || '').trim()
     let ids = new Set<string>()
@@ -4909,14 +4949,14 @@ class ChatService {
 
     const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, false, beginTimestamp, endTimestamp)
     if (!cursorResult.success || !cursorResult.cursor) {
-      return counters
+      throw new Error(cursorResult.error || '打开特殊消息统计游标失败')
     }
 
     const cursor = cursorResult.cursor
     try {
       while (true) {
         const batch = await wcdbService.fetchMessageBatch(cursor)
-        if (!batch.success) break
+        if (!batch.success) throw new Error(batch.error || '读取特殊消息统计批次失败')
         const rows = Array.isArray(batch.rows) ? batch.rows as Record<string, any>[] : []
         for (const row of rows) {
           const localType = this.getRowInt(row, ['local_type'], 1)
@@ -4969,14 +5009,14 @@ class ChatService {
     const fileLocalTypeSet = FILE_APP_LOCAL_TYPE_SET
     const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, false, beginTimestamp, endTimestamp)
     if (!cursorResult.success || !cursorResult.cursor) {
-      return count
+      throw new Error(cursorResult.error || '打开文件消息统计游标失败')
     }
 
     const cursor = cursorResult.cursor
     try {
       while (true) {
         const batch = await wcdbService.fetchMessageBatch(cursor)
-        if (!batch.success) break
+        if (!batch.success) throw new Error(batch.error || '读取文件消息统计批次失败')
         const rows = Array.isArray(batch.rows) ? batch.rows as Record<string, any>[] : []
         for (const row of rows) {
           const localType = this.getRowInt(row, ['local_type'], 1)
@@ -5031,7 +5071,7 @@ class ChatService {
     const senderIdentities = new Set<string>()
     const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, false, beginTimestamp, endTimestamp)
     if (!cursorResult.success || !cursorResult.cursor) {
-      return stats
+      throw new Error(cursorResult.error || '打开消息统计游标失败')
     }
 
     const cursor = cursorResult.cursor
@@ -5039,7 +5079,7 @@ class ChatService {
       while (true) {
         const batch = await wcdbService.fetchMessageBatch(cursor)
         if (!batch.success) {
-          break
+          throw new Error(batch.error || '读取消息统计批次失败')
         }
 
         const rows = Array.isArray(batch.rows) ? batch.rows as Record<string, any>[] : []
@@ -5167,24 +5207,16 @@ class ChatService {
     if (lastTs > 0) stats.lastTimestamp = lastTs
 
     if (preferAccurateSpecialTypes) {
-      try {
-        const preciseCounters = await this.collectSpecialMessageCountsByCursorScan(sessionId, beginTimestamp, endTimestamp)
-        stats.transferMessages = preciseCounters.transferMessages
-        stats.redPacketMessages = preciseCounters.redPacketMessages
-        stats.callMessages = preciseCounters.callMessages
-        stats.fileMessages = preciseCounters.fileMessages
-      } catch {
-        // 保留 native 聚合结果作为兜底
-      }
+      const preciseCounters = await this.collectSpecialMessageCountsByCursorScan(sessionId, beginTimestamp, endTimestamp)
+      stats.transferMessages = preciseCounters.transferMessages
+      stats.redPacketMessages = preciseCounters.redPacketMessages
+      stats.callMessages = preciseCounters.callMessages
+      stats.fileMessages = preciseCounters.fileMessages
     } else {
       // 新版 native 聚合会返回 file_messages；仅兼容旧 DLL 缺少该字段时再走 cursor 兜底。
       if (!hasNativeFileMessages) {
-        try {
-          const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
-          stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)
-        } catch {
-          // 保留 native 聚合结果作为兜底
-        }
+        const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
+        stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)
       }
     }
 
@@ -5325,32 +5357,6 @@ class ChatService {
     return { privateMutualGroupMap, groupMutualFriendMap }
   }
 
-  private buildEmptyExportSessionStats(sessionId: string, includeRelations: boolean): ExportSessionStats {
-    const isGroup = sessionId.endsWith('@chatroom')
-    const stats: ExportSessionStats = {
-      totalMessages: 0,
-      voiceMessages: 0,
-      imageMessages: 0,
-      videoMessages: 0,
-      emojiMessages: 0,
-      fileMessages: 0,
-      transferMessages: 0,
-      redPacketMessages: 0,
-      callMessages: 0
-    }
-    if (isGroup) {
-      stats.groupMyMessages = 0
-      stats.groupActiveSpeakers = 0
-      stats.groupMemberCount = 0
-      if (includeRelations) {
-        stats.groupMutualFriends = 0
-      }
-    } else if (includeRelations) {
-      stats.privateMutualGroups = 0
-    }
-    return stats
-  }
-
   private async computeSessionExportStats(
     sessionId: string,
     selfIdentitySet: Set<string>,
@@ -5366,6 +5372,16 @@ class ChatService {
       beginTimestamp,
       endTimestamp
     )
+    if (beginTimestamp <= 0 && endTimestamp <= 0) {
+      const countResult = await this.getSessionMessageCounts([sessionId], {
+        preferHintCache: false
+      })
+      const accurateCount = countResult.counts?.[sessionId]
+      if (!countResult.success || !Number.isFinite(accurateCount)) {
+        throw new Error(countResult.error || `无法确认会话 ${sessionId} 的消息总数`)
+      }
+      stats.totalMessages = Math.max(0, Math.floor(Number(accurateCount)))
+    }
     const isGroup = sessionId.endsWith('@chatroom')
 
     if (isGroup) {
@@ -5429,16 +5445,19 @@ class ChatService {
     // can then be persisted in the stats cache.
     let accurateMessageCountMap: Record<string, number> = {}
     if (beginTimestamp <= 0 && endTimestamp <= 0) {
-      try {
-        const countResult = await this.getSessionMessageCounts(normalizedSessionIds, {
-          preferHintCache: false
-        })
-        if (countResult.success && countResult.counts) {
-          accurateMessageCountMap = countResult.counts
-        }
-      } catch {
-        accurateMessageCountMap = {}
+      const countResult = await this.getSessionMessageCounts(normalizedSessionIds, {
+        preferHintCache: false
+      })
+      if (!countResult.success || !countResult.counts) {
+        throw new Error(countResult.error || '无法确认会话消息总数')
       }
+      const countMap = countResult.counts
+      const invalidSessionId = normalizedSessionIds.find((sessionId) => (
+        !Object.prototype.hasOwnProperty.call(countMap, sessionId) ||
+        !Number.isFinite(countMap[sessionId])
+      ))
+      if (invalidSessionId) throw new Error(`会话消息总数结果不完整: ${invalidSessionId}`)
+      accurateMessageCountMap = countMap
     }
 
     let memberCountMap: Record<string, number> = {}
@@ -5509,6 +5528,7 @@ class ChatService {
       }
     }
 
+    const failedStats: Array<{ sessionId: string; error: string }> = []
     await this.forEachWithConcurrency(normalizedSessionIds, 6, async (sessionId) => {
       try {
         const fromNativeBatch = hasNativeBatchStats && nativeBatchStats[sessionId]
@@ -5527,12 +5547,8 @@ class ChatService {
         }
         // 新版 native 批量统计会返回 file_messages；仅兼容旧 DLL 缺少该字段时再走 cursor 兜底。
         if (fromNativeBatch && !nativeBatchHasFileMessages[sessionId]) {
-          try {
-            const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
-            stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)
-          } catch {
-            // 保留 native 批量结果作为兜底
-          }
+          const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
+          stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)
         }
         if (sessionId.endsWith('@chatroom')) {
           if (shouldLoadGroupMemberCount) {
@@ -5551,10 +5567,15 @@ class ChatService {
             : 0
         }
         result[sessionId] = stats
-      } catch {
-        result[sessionId] = this.buildEmptyExportSessionStats(sessionId, includeRelations)
+      } catch (error) {
+        failedStats.push({ sessionId, error: String(error) })
       }
     })
+
+    if (failedStats.length > 0) {
+      const summary = failedStats.slice(0, 3).map(item => `${item.sessionId}: ${item.error}`).join('；')
+      throw new Error(`部分会话统计失败（${failedStats.length}/${normalizedSessionIds.length}）：${summary}`)
+    }
 
     return result
   }
@@ -8531,15 +8552,18 @@ class ChatService {
       }
 
       if (!Number.isFinite(messageCount)) {
-        messageCount = messageCountResult.status === 'fulfilled' &&
+        const resolvedMessageCount = messageCountResult.status === 'fulfilled' &&
           messageCountResult.value.success &&
           Number.isFinite(messageCountResult.value.count)
           ? Math.max(0, Math.floor(messageCountResult.value.count || 0))
-          : 0
-        this.sessionMessageCountCache.set(normalizedSessionId, {
-          count: messageCount,
-          updatedAt: Date.now()
-        })
+          : Number.NaN
+        messageCount = resolvedMessageCount
+        if (Number.isFinite(resolvedMessageCount)) {
+          this.sessionMessageCountCache.set(normalizedSessionId, {
+            count: resolvedMessageCount,
+            updatedAt: Date.now()
+          })
+        }
       }
 
       const detail: SessionDetailFast = {
@@ -8549,13 +8573,17 @@ class ChatService {
         nickName,
         alias,
         avatarUrl,
-        messageCount: Math.max(0, Math.floor(messageCount || 0))
+        messageCount: Number.isFinite(messageCount)
+          ? Math.max(0, Math.floor(messageCount as number))
+          : Number.NaN
       }
 
-      this.sessionDetailFastCache.set(normalizedSessionId, {
-        detail,
-        updatedAt: Date.now()
-      })
+      if (Number.isFinite(detail.messageCount)) {
+        this.sessionDetailFastCache.set(normalizedSessionId, {
+          detail,
+          updatedAt: Date.now()
+        })
+      }
 
       return { success: true, detail }
     } catch (e) {
@@ -8751,6 +8779,7 @@ class ChatService {
       const resultMap: Record<string, ExportSessionStats> = {}
       const cacheMeta: Record<string, ExportSessionStatsCacheMeta> = {}
       const needsRefreshSet = new Set<string>()
+      const failedSessionIds = new Set<string>()
       const pendingSessionIds: string[] = []
       const now = Date.now()
 
@@ -8895,18 +8924,17 @@ class ChatService {
                 }
               }
             } catch {
-              resultMap[sessionId] = this.buildEmptyExportSessionStats(sessionId, includeRelations)
-              if (useRangeFilter) {
-                cacheMeta[sessionId] = {
-                  updatedAt: Date.now(),
-                  stale: true,
-                  includeRelations,
-                  source: 'fresh',
-                  rangeFiltered: true
-                }
-              }
+              failedSessionIds.add(sessionId)
+              needsRefreshSet.add(sessionId)
             }
           })
+        }
+      }
+
+      if (failedSessionIds.size > 0 && Object.keys(resultMap).length === 0) {
+        return {
+          success: false,
+          error: `读取会话统计失败（${failedSessionIds.size}/${normalizedSessionIds.length}），请重试`
         }
       }
 
@@ -10856,9 +10884,7 @@ class ChatService {
         0
       )
       if (!cursorResult.success || !cursorResult.cursor) {
-        console.log(`[足迹分段] 打开游标失败: ${sessionId}, 原因: ${cursorResult.error || '未知'}`)
-        params.onProgress?.(sessionIndex + 1, params.privateSessionIds.length)
-        continue
+        throw new Error(cursorResult.error || `无法打开会话 ${sessionId} 的足迹分段游标`)
       }
 
       let segmentCursor = 0
@@ -10893,15 +10919,13 @@ class ChatService {
       }
 
       let hasMore = true
-      let batchCount = 0
-      let totalMessages = 0
       try {
         while (hasMore) {
           const batchResult = await wcdbService.fetchMessageBatch(cursorResult.cursor)
-          batchCount++
-          if (!batchResult.success || !Array.isArray(batchResult.rows)) break
+          if (!batchResult.success || !Array.isArray(batchResult.rows)) {
+            throw new Error(batchResult.error || `无法读取会话 ${sessionId} 的足迹分段数据`)
+          }
           hasMore = Boolean(batchResult.hasMore)
-          totalMessages += batchResult.rows.length
 
           for (const row of batchResult.rows as Array<Record<string, any>>) {
             const createTime = this.toSafeInt(row.create_time, 0)

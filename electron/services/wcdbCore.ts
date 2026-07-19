@@ -2191,7 +2191,10 @@ export class WcdbCore {
         if (result === -7) {
           return { success: false, error: `message schema mismatch：会话 ${sessionId} 的消息表结构不匹配` }
         }
-        counts[sessionId] = result === 0 && Number.isFinite(outCount[0]) ? Math.max(0, Math.floor(outCount[0])) : 0
+        if (result !== 0 || !Number.isFinite(outCount[0])) {
+          return { success: false, error: `获取会话 ${sessionId} 的消息总数失败: ${result}` }
+        }
+        counts[sessionId] = Math.max(0, Math.floor(outCount[0]))
 
         if (i > 0 && i % 160 === 0) {
           await new Promise(resolve => setImmediate(resolve))
@@ -2220,8 +2223,14 @@ export class WcdbCore {
       const raw = JSON.parse(jsonStr) || {}
       const counts: Record<string, number> = {}
       for (const sid of sessionIds || []) {
-        const value = Number(raw?.[sid] ?? 0)
-        counts[sid] = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+        if (!Object.prototype.hasOwnProperty.call(raw, sid)) {
+          return { success: false, error: `会话消息总数结果不完整: ${sid}` }
+        }
+        const value = Number(raw[sid])
+        if (!Number.isFinite(value)) {
+          return { success: false, error: `会话消息总数无效: ${sid}` }
+        }
+        counts[sid] = Math.max(0, Math.floor(value))
       }
       return { success: true, counts }
     } catch (e) {
@@ -4032,12 +4041,14 @@ export class WcdbCore {
       const tablesResult = await this.listTables('message', dbPath)
       if (!tablesResult.success || !Array.isArray(tablesResult.tables)) {
         lastError = tablesResult.error || lastError
+        failedQueries += 1
         continue
       }
       const tableNames = tablesResult.tables.filter((tableName) => {
         const normalized = String(tableName || '').trim().toLowerCase()
         return normalized.startsWith('msg_') && acceptedSuffixes.has(normalized.slice(4))
       })
+      if (tableNames.length === 0) continue
       const name2IdTable = tablesResult.tables.find((tableName) => (
         String(tableName || '').trim().toLowerCase() === 'name2id'
       ))
@@ -4057,6 +4068,7 @@ export class WcdbCore {
           }
         } else {
           lastError = nameResult.error || lastError
+          failedQueries += 1
         }
       }
       for (const tableName of tableNames) {

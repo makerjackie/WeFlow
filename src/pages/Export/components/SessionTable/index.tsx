@@ -24,6 +24,7 @@ interface SessionTableProps {
   onAutomationExport?: () => void
   isLoading?: boolean
   error?: string | null
+  metricsError?: string | null
   metricsMap?: Record<string, SessionContentMetric>
   loadingRefs?: Set<string>
   messageCountLoadingRefs?: Set<string>
@@ -49,6 +50,7 @@ const SessionTable: React.FC<SessionTableProps> = ({
   onAutomationExport,
   isLoading,
   error,
+  metricsError,
   metricsMap,
   loadingRefs,
   messageCountLoadingRefs,
@@ -264,12 +266,13 @@ const SessionTable: React.FC<SessionTableProps> = ({
               const isMetricsLoading = loadingRefs?.has(session.username) === true
               const isMessageCountLoading = messageCountLoadingRefs?.has(session.username) === true
               const hasExactTotal = metrics?.totalMessages !== undefined
-              const hintedTotal = Number(session.messageCountHint || 0)
+              const hintedTotal = Number(session.messageCountHint)
+              const hasHintedTotal = Number.isFinite(hintedTotal) && hintedTotal > 0
               const totalCount = hasExactTotal
                 ? Math.max(0, Math.floor(Number(metrics?.totalMessages || 0)))
-                : hintedTotal > 0
+                : hasHintedTotal
                   ? Math.floor(hintedTotal)
-                  : 0
+                  : null
               const sessionDisplayName = displayNameOrFallback(session.username, session.displayName)
 
               return (
@@ -297,10 +300,10 @@ const SessionTable: React.FC<SessionTableProps> = ({
                     </div>
                   </div>
                   <div className="col-count">
-                    {isMessageCountLoading && !hasExactTotal && hintedTotal <= 0 ? (
+                    {isMessageCountLoading && !hasExactTotal && !hasHintedTotal ? (
                       <span className="st-stat-shimmer" />
                     ) : (
-                      <span className="st-stat-fade-in">{totalCount.toLocaleString()}</span>
+                      <span className="st-stat-fade-in">{totalCount === null ? '-' : totalCount.toLocaleString()}</span>
                     )}
                   </div>
                   <div className="col-time">
@@ -381,6 +384,14 @@ const SessionTable: React.FC<SessionTableProps> = ({
                 />
               </div>
             </div>
+          </div>
+        )}
+        {!isMetricsScanning && metricsError && (
+          <div className="st-metrics-error" role="alert">
+            <span>统计读取失败：{metricsError}</span>
+            {onRefreshStats && (
+              <button type="button" onClick={onRefreshStats}>重试</button>
+            )}
           </div>
         )}
       </div>

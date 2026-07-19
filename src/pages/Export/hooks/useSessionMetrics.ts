@@ -129,12 +129,20 @@ export const useSessionMetrics = create<SessionMetricsState>((set, get) => ({
       if (!result.success || !result.counts) {
         throw new Error(result.error || '读取总消息数失败')
       }
+      const countMap = result.counts
+      const invalidSessionId = targetIds.find((sessionId) => (
+        !Object.prototype.hasOwnProperty.call(countMap, sessionId) ||
+        !Number.isFinite(countMap[sessionId])
+      ))
+      if (invalidSessionId) {
+        throw new Error(`总消息数结果不完整，请重试`)
+      }
 
       set(current => {
         const next = { ...current.metricsMap }
         for (const sessionId of targetIds) {
-          const rawCount = result.counts?.[sessionId]
-          const totalMessages = Number.isFinite(rawCount) ? Math.max(0, Math.floor(Number(rawCount))) : 0
+          const rawCount = countMap[sessionId]
+          const totalMessages = Math.max(0, Math.floor(Number(rawCount)))
           next[sessionId] = { ...next[sessionId], totalMessages }
         }
         return {

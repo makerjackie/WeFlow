@@ -1,5 +1,5 @@
 import React, { memo, useState } from 'react'
-import { Check, CheckCircle2, Copy, XCircle, Loader2, PlayCircle, PauseCircle, Trash2, StopCircle } from 'lucide-react'
+import { AlertTriangle, Check, CheckCircle2, Copy, XCircle, Loader2, PlayCircle, PauseCircle, Trash2, StopCircle } from 'lucide-react'
 import type { ExportTask } from '../../types'
 import type { BackgroundTaskRecord } from '../../../../types/backgroundTask'
 import {
@@ -48,12 +48,14 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   onCancelBackgroundTask,
   onClearCompletedBackgroundTasks
 }) => {
-  const [copiedErrorTaskId, setCopiedErrorTaskId] = useState<string | null>(null)
+  const [copyErrorState, setCopyErrorState] = useState<{ taskId: string; status: 'copied' | 'failed' } | null>(null)
   const hasTasks = exportTasks.length > 0 || backgroundTasks.length > 0
   
   if (!hasTasks) return null
 
-  const completedExportTasks = exportTasks.filter(t => t.status === 'success' || t.status === 'error')
+  const completedExportTasks = exportTasks.filter(t => (
+    t.status === 'success' || t.status === 'partial' || t.status === 'canceled' || t.status === 'error'
+  ))
   const completedBackgroundTasks = backgroundTasks.filter(isBackgroundTaskSettled)
   const hasCompletedTasks = completedExportTasks.length > 0 || completedBackgroundTasks.length > 0
 
@@ -63,8 +65,10 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   }
 
   const handleCopyError = async (taskId: string, error: string) => {
+    let copied = false
     try {
       await navigator.clipboard.writeText(error)
+      copied = true
     } catch {
       const textarea = document.createElement('textarea')
       textarea.value = error
@@ -73,13 +77,16 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
       textarea.style.opacity = '0'
       document.body.appendChild(textarea)
       textarea.select()
-      document.execCommand('copy')
-      textarea.remove()
+      try {
+        copied = document.execCommand('copy')
+      } finally {
+        textarea.remove()
+      }
     }
 
-    setCopiedErrorTaskId(taskId)
+    setCopyErrorState({ taskId, status: copied ? 'copied' : 'failed' })
     window.setTimeout(() => {
-      setCopiedErrorTaskId((current) => current === taskId ? null : current)
+      setCopyErrorState((current) => current?.taskId === taskId ? null : current)
     }, 1800)
   }
 
@@ -111,9 +118,21 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
                 <span className="task-status-badge">
                   {task.status === 'running' && <Loader2 className="spin" size={12} />}
                   {task.status === 'success' && <CheckCircle2 size={12} />}
+                  {task.status === 'partial' && <AlertTriangle size={12} />}
+                  {task.status === 'canceled' && <StopCircle size={12} />}
                   {task.status === 'error' && <XCircle size={12} />}
                   {task.status === 'cancel_requested' && <Loader2 className="spin" size={12} />}
-                  {task.status === 'running' ? '导出中' : task.status === 'success' ? '已完成' : task.status === 'cancel_requested' ? '取消中' : '失败'}
+                  {task.status === 'running'
+                    ? '导出中'
+                    : task.status === 'success'
+                      ? '已完成'
+                      : task.status === 'partial'
+                        ? '部分完成'
+                        : task.status === 'canceled'
+                          ? '已取消'
+                          : task.status === 'cancel_requested'
+                            ? '取消中'
+                            : '失败'}
                 </span>
               </div>
               <div className="task-actions">
@@ -147,8 +166,10 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
                     title="复制错误信息"
                     aria-label="复制错误信息"
                   >
-                    {copiedErrorTaskId === task.id ? <Check size={13} /> : <Copy size={13} />}
-                    {copiedErrorTaskId === task.id ? '已复制' : '复制'}
+                    {copyErrorState?.taskId === task.id && copyErrorState.status === 'copied' ? <Check size={13} /> : <Copy size={13} />}
+                    {copyErrorState?.taskId === task.id
+                      ? (copyErrorState.status === 'copied' ? '已复制' : '复制失败')
+                      : '复制'}
                   </button>
                 </div>
               )}
@@ -162,9 +183,9 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
           <div className="bg-tasks-section">
             <h3 className="section-title">全局后台任务</h3>
             {backgroundTasks.map(bgTask => {
-              const isPausable = bgTask.status === 'running'
-              const isResumable = bgTask.status === 'paused'
-              const isCancelable = !isBackgroundTaskSettled(bgTask)
+              const isPausable = bgTask.status === 'running' && bgTask.resumable
+              const isResumable = bgTask.status === 'paused' && bgTask.resumable
+              const isCancelable = !isBackgroundTaskSettled(bgTask) && bgTask.cancelable
               const progress = parseBackgroundTaskProgress(bgTask.progressText)
               const sourceLabel = backgroundTaskSourceLabels[bgTask.sourcePage] || '后台任务'
 
@@ -214,6 +235,23 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
                         {bgTask.detail && <span className="phase">{bgTask.detail}</span>}
                         {bgTask.progressText && <span className="count">{bgTask.progressText}</span>}
                       </div>
+                    </div>
+                  )}
+                  {bgTask.status === 'failed' && bgTask.detail && (
+                    <div className="task-error-panel">
+                      <div className="task-error-msg">{bgTask.detail}</div>
+                      <button
+                        type="button"
+                        className="copy-error-btn"
+                        onClick={() => void handleCopyError(bgTask.id, bgTask.detail || '')}
+                        title="复制错误信息"
+                        aria-label="复制错误信息"
+                      >
+                        {copyErrorState?.taskId === bgTask.id && copyErrorState.status === 'copied' ? <Check size={13} /> : <Copy size={13} />}
+                        {copyErrorState?.taskId === bgTask.id
+                          ? (copyErrorState.status === 'copied' ? '已复制' : '复制失败')
+                          : '复制'}
+                      </button>
                     </div>
                   )}
                 </div>

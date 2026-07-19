@@ -23,7 +23,7 @@
 >
 > 如果导出聊天记录后，想深入分析聊天内容可以试试 [ChatLab](https://chatlab.fun/)
 
-官网与备用下载：[weflow.01mvp.com](https://weflow.01mvp.com) · [v5.0.7 更新说明](docs/releases/v5.0.7.md)
+官网与备用下载：[weflow.01mvp.com](https://weflow.01mvp.com) · [v5.0.8 更新说明](docs/releases/v5.0.8.md)
 
 
 ## 主要功能

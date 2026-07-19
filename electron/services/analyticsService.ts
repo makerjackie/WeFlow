@@ -215,14 +215,18 @@ class AnalyticsService {
     endTimestamp = 0
   ): Promise<void> {
     const cursorResult = await wcdbService.openMessageCursor(sessionId, 500, true, beginTimestamp, endTimestamp)
-    if (!cursorResult.success || !cursorResult.cursor) return
+    if (!cursorResult.success || !cursorResult.cursor) {
+      throw new Error(cursorResult.error || `无法打开会话 ${sessionId} 的统计游标`)
+    }
 
     try {
       let hasMore = true
       let batchCount = 0
       while (hasMore) {
         const batch = await wcdbService.fetchMessageBatch(cursorResult.cursor)
-        if (!batch.success || !batch.rows) break
+        if (!batch.success || !batch.rows) {
+          throw new Error(batch.error || `无法读取会话 ${sessionId} 的统计数据`)
+        }
         for (const row of batch.rows) {
           onRow(row)
         }

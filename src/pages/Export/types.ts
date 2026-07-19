@@ -18,6 +18,8 @@ export type TaskStatus =
   | 'paused'
   | 'cancel_requested'
   | 'success'
+  | 'partial'
+  | 'canceled'
   | 'error'
 
 export type TaskScope = 'single' | 'multi' | 'content' | 'sns'
@@ -160,6 +162,9 @@ export interface ExportTask {
   startedAt?: number
   finishedAt?: number
   error?: string
+  successCount?: number
+  failCount?: number
+  failedSessionErrors?: Record<string, string>
   payload: ExportTaskPayload
   progress: TaskProgress
   performance?: TaskPerformance

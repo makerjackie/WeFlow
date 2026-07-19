@@ -76,7 +76,8 @@ function ExportPage() {
     loadingRefs,
     messageCountLoadingRefs,
     messageCountProgress,
-    detailProgress
+    detailProgress,
+    error: metricsError
   } = useSessionMetrics()
 
   const {
@@ -357,6 +358,7 @@ function ExportPage() {
             sortConfig={sortConfig}
             onSortChange={setSortConfig}
             error={sessionsError}
+            metricsError={metricsError?.message || null}
             metricsMap={metricsMap}
             loadingRefs={loadingRefs}
             messageCountLoadingRefs={messageCountLoadingRefs}

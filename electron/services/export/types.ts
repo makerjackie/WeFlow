@@ -123,6 +123,7 @@ export interface FileAttachmentSearchRoot {
 }
 
 export interface ExportProgress {
+  taskId?: string
   current: number
   total: number
   currentSession: string

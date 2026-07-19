@@ -49,8 +49,10 @@ const countSessionsByTableScan = async (
     }
 
     let listedDatabaseCount = 0
+    let failedDatabaseCount = 0
     let matchedTableCount = 0
     let successfulQueryCount = 0
+    let failedQueryCount = 0
     let lastError = ''
     for (const dbPathValue of dbResult.data) {
         const dbPath = String(dbPathValue || '').trim()
@@ -58,6 +60,7 @@ const countSessionsByTableScan = async (
         const tablesResult = await core.listTables('message', dbPath)
         if (!tablesResult.success || !Array.isArray(tablesResult.tables)) {
             lastError = tablesResult.error || lastError
+            failedDatabaseCount += 1
             continue
         }
         listedDatabaseCount += 1
@@ -78,6 +81,7 @@ const countSessionsByTableScan = async (
             const queryResult = await core.execQuery('message', dbPath, sql)
             if (!queryResult.success || !Array.isArray(queryResult.rows)) {
                 lastError = queryResult.error || lastError
+                failedQueryCount += 1
                 continue
             }
             successfulQueryCount += 1
@@ -95,8 +99,8 @@ const countSessionsByTableScan = async (
     if (dbResult.data.length > 0 && listedDatabaseCount === 0) {
         return { success: false, error: lastError || '无法读取消息表列表' }
     }
-    if (matchedTableCount > 0 && successfulQueryCount === 0) {
-        return { success: false, error: lastError || '无法统计消息表' }
+    if (failedDatabaseCount > 0 || failedQueryCount > 0 || (matchedTableCount > 0 && successfulQueryCount === 0)) {
+        return { success: false, error: lastError || '消息表统计不完整，请重试' }
     }
     return { success: true, counts }
 }

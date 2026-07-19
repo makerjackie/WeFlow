@@ -114,7 +114,7 @@ export function useExportTasks(): ExportTasksResult {
       try {
         // Subscribe to progress
         progressUnsubscribe = window.electronAPI.export.onProgress((progressPayload: ExportProgress) => {
-          if ((progressPayload as any).taskId && (progressPayload as any).taskId !== taskId) return
+          if (progressPayload.taskId !== taskId) return
 
           const sig = buildProgressPayloadSignature(progressPayload)
           if (sig === lastProgressSig) return
@@ -154,16 +154,40 @@ export function useExportTasks(): ExportTasksResult {
           { taskId }
         )
 
+        const successCount = Math.max(0, Math.floor(Number(result?.successCount || 0)))
+        const failCount = Math.max(0, Math.floor(Number(result?.failCount || 0)))
+        const isStopped = result?.stopped === true
+        const isPartial = !isStopped && successCount > 0 && failCount > 0
+        const finalStatus: TaskStatus = isStopped
+          ? 'canceled'
+          : isPartial
+            ? 'partial'
+            : result?.success
+              ? 'success'
+              : 'error'
+        const failedDetails = Object.values(result?.failedSessionErrors || {})
+          .map(value => String(value || '').trim())
+          .filter(Boolean)
+          .slice(0, 3)
+          .join('；')
+        const resultError = isPartial
+          ? `导出部分完成：成功 ${successCount}，失败 ${failCount}${failedDetails ? `；${failedDetails}` : ''}`
+          : result?.error || undefined
+
         updateTask(taskId, (task) => ({
           ...task,
-          status: result?.success ? 'success' : 'error',
+          status: finalStatus,
           finishedAt: Date.now(),
-          error: result?.error || undefined,
+          error: resultError,
+          successCount,
+          failCount,
+          failedSessionErrors: result?.failedSessionErrors,
           sessionOutputPaths: result?.sessionOutputPaths
         }))
 
         if (payload.source === 'automation') {
           const finishedAt = Date.now()
+          const automationSucceeded = finalStatus === 'success'
           updateAutomationRunState(payload.automationTaskId, (prev) => {
             const previousSuccessCount = Math.max(0, Math.floor(Number(prev.runState?.successCount || 0)))
             return {
@@ -171,11 +195,11 @@ export function useExportTasks(): ExportTasksResult {
               updatedAt: finishedAt,
               runState: {
                 ...(prev.runState || {}),
-                lastRunStatus: result?.success ? 'success' : 'error',
+                lastRunStatus: automationSucceeded ? 'success' : 'error',
                 lastFinishedAt: finishedAt,
-                lastSuccessAt: result?.success ? finishedAt : prev.runState?.lastSuccessAt,
-                lastError: result?.success ? undefined : (result?.error || '导出失败'),
-                successCount: result?.success ? previousSuccessCount + 1 : previousSuccessCount
+                lastSuccessAt: automationSucceeded ? finishedAt : prev.runState?.lastSuccessAt,
+                lastError: automationSucceeded ? undefined : (resultError || (isStopped ? '导出已取消' : '导出失败')),
+                successCount: automationSucceeded ? previousSuccessCount + 1 : previousSuccessCount
               }
             }
           })
@@ -228,7 +252,7 @@ export function useExportTasks(): ExportTasksResult {
   }, [])
 
   const activeTasks = tasks.filter(t => t.status === 'running' || t.status === 'cancel_requested')
-  const completedTasks = tasks.filter(t => t.status === 'success' || t.status === 'error')
+  const completedTasks = tasks.filter(t => t.status === 'success' || t.status === 'partial' || t.status === 'canceled' || t.status === 'error')
 
   return {
     tasks,

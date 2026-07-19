@@ -388,6 +388,42 @@
         }
       }
     }
+
+    .st-metrics-error {
+      position: absolute;
+      left: 50%;
+      bottom: 18px;
+      z-index: 4;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      width: min(620px, calc(100% - 48px));
+      padding: 9px 12px;
+      border: 1px solid color-mix(in srgb, #ef4444 28%, var(--border-color));
+      border-radius: 10px;
+      background: color-mix(in srgb, #ef4444 8%, var(--bg-surface));
+      color: #ef4444;
+      font-size: 12px;
+      transform: translateX(-50%);
+
+      span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      button {
+        flex: 0 0 auto;
+        border: 1px solid color-mix(in srgb, #ef4444 28%, var(--border-color));
+        border-radius: 6px;
+        padding: 4px 9px;
+        background: var(--bg-surface);
+        color: #ef4444;
+        cursor: pointer;
+      }
+    }
   }
 
   // ── Data Row ────────────────────────────────────────────────────────────

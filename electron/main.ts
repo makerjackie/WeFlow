@@ -1087,6 +1087,13 @@ const resolveAppIconPath = (): string => {
   return join(__dirname, `../public/${iconName}`)
 }
 
+const resolveTrayIconPath = (): string => {
+  if (!process.env.VITE_DEV_SERVER_URL) {
+    return join(__dirname, '../dist/icon.png')
+  }
+  return join(__dirname, '../public/icon.png')
+}
+
 const requestMainWindowCloseConfirmation = (win: BrowserWindow): void => {
   if (isClosePromptVisible) return
   isClosePromptVisible = true
@@ -3607,7 +3614,7 @@ function registerIpcHandlers() {
     }
 
     const queueProgress = (progress: ExportProgress) => {
-      pendingProgress = progress
+      pendingProgress = taskId ? { ...progress, taskId } : progress
       const force = progress.phase === 'complete'
       if (force) {
         flushProgress()
@@ -4636,6 +4643,7 @@ app.whenReady().then(async () => {
   wcdbService.setLogEnabled(configService.get('logEnabled') === true)
   registerIpcHandlers()
   chatService.addDbMonitorListener((type, json) => {
+    void analyticsService.clearCache()
     messagePushService.handleDbMonitorChange(type, json)
     insightService.handleDbMonitorChange(type, json)
   })
@@ -4645,10 +4653,14 @@ app.whenReady().then(async () => {
   ensureWeChatRequestHeaderInterceptor()
   mainWindow = createWindow({ autoShow: false })
 
-  const resolvedTrayIcon = resolveAppIconPath()
+  const resolvedTrayIcon = resolveTrayIconPath()
 
   try {
-    tray = new Tray(resolvedTrayIcon)
+    const trayIcon = nativeImage.createFromPath(resolvedTrayIcon)
+    if (trayIcon.isEmpty()) {
+      throw new Error(`Tray icon is empty: ${resolvedTrayIcon}`)
+    }
+    tray = new Tray(trayIcon)
     tray.setToolTip('WeFlow')
     const contextMenu = Menu.buildFromTemplate([
       {

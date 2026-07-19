@@ -593,8 +593,8 @@ export class ExportOrchestrator {
           progressEmitter.flush()
 
           const allFailed = successCount === 0 && failCount > 0
-          const failureSummary = allFailed
-            ? Object.values(failedSessionErrors).slice(0, 3).join('；') || '所有会话导出失败'
+          const failureSummary = failCount > 0
+            ? `${allFailed ? '所有会话导出失败' : `部分会话导出失败（成功 ${successCount}，失败 ${failCount}）`}${Object.keys(failedSessionErrors).length > 0 ? `：${Object.values(failedSessionErrors).slice(0, 3).join('；')}` : ''}`
             : undefined
           return {
             success: !allFailed,

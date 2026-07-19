@@ -259,7 +259,14 @@ const collectWeliveErrorText = (result: any): string => {
 }
 
 const shouldFallbackFromWeliveResult = (result: any): boolean => {
-  if (!result || result.success) return false
+  if (!result) return false
+  const failedSessionErrors = result?.failedSessionErrors && typeof result.failedSessionErrors === 'object'
+    ? Object.keys(result.failedSessionErrors)
+    : []
+  const hasReportedFailure = result.success !== true ||
+    Number(result?.failCount || 0) > 0 ||
+    failedSessionErrors.length > 0
+  if (!hasReportedFailure) return false
   const text = collectWeliveErrorText(result)
   return /3221225477|0x?c0000005|-1073741819|native jsonl export failed with status\s*-3|cursor state failed|QueryMessageBatch\s+no rows|WeLive 原始导出数据不完整|JSON 解析失败|Unterminated string in JSON|export timed out|without progress/i.test(text)
 }
@@ -496,7 +503,7 @@ async function runWeliveEngine() {
   }
 }
 
-async function runLegacyEngine() {
+async function runLegacyEngine(sessionIdsOverride?: string[]): Promise<any> {
   const [{ wcdbService }, { exportService }] = await Promise.all([
     import('./services/wcdbService'),
     import('./services/export')
@@ -567,8 +574,11 @@ async function runLegacyEngine() {
       result = await exportService.orchestrator.exportSessionToChatLab(sessionId, outputPath, options, onProgress, taskControl)
     }
   } else {
+    const effectiveSessionIds = Array.isArray(sessionIdsOverride)
+      ? sessionIdsOverride
+      : (Array.isArray(config.sessionIds) ? config.sessionIds : [])
     result = await exportService.exportSessions(
-      Array.isArray(config.sessionIds) ? config.sessionIds : [],
+      effectiveSessionIds,
       String(config.outputDir || ''),
       {
         ...(config.options || { format: 'json' }),
@@ -584,23 +594,99 @@ async function runLegacyEngine() {
 
   flushProgress()
   flushCreatedPaths()
+  return result
+}
 
-  parentPort?.postMessage({
-    type: 'export:result',
-    data: result
+function postExportResult(result: any) {
+  flushProgress()
+  flushCreatedPaths()
+  parentPort?.postMessage({ type: 'export:result', data: result })
+}
+
+function mergeWeliveFallbackResult(weliveResult: any, fallbackResult: any, fallbackSessionIds: string[]) {
+  const configuredSessionIds = (Array.isArray(config.sessionIds) ? config.sessionIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean)
+  const fallbackIdSet = new Set(fallbackSessionIds)
+  const weliveSuccessIds = Array.isArray(weliveResult?.successSessionIds)
+    ? weliveResult.successSessionIds
+        .map((id: unknown) => String(id || '').trim())
+        .filter((id: string) => Boolean(id) && !fallbackIdSet.has(id))
+    : configuredSessionIds.filter((id) => !fallbackIdSet.has(id))
+  const fallbackFailedIds = Array.isArray(fallbackResult?.failedSessionIds)
+    ? fallbackResult.failedSessionIds.map((id: unknown) => String(id || '').trim()).filter(Boolean)
+    : (fallbackResult?.success === false ? fallbackSessionIds : [])
+  const fallbackFailedIdSet = new Set(fallbackFailedIds)
+  const fallbackSuccessIds = Array.isArray(fallbackResult?.successSessionIds)
+    ? fallbackResult.successSessionIds.map((id: unknown) => String(id || '').trim()).filter(Boolean)
+    : fallbackSessionIds.filter((id) => !fallbackFailedIdSet.has(id))
+  const successSessionIds = Array.from(new Set([...weliveSuccessIds, ...fallbackSuccessIds]))
+  const failedSessionIds = Array.from(new Set(fallbackFailedIds))
+  const failedSessionErrors = failedSessionIds.reduce<Record<string, string>>((acc, sessionId) => {
+    acc[sessionId] = String(fallbackResult?.failedSessionErrors?.[sessionId] || fallbackResult?.error || '兼容导出失败')
+    return acc
+  }, {})
+
+  return {
+    ...fallbackResult,
+    success: successSessionIds.length > 0,
+    successCount: successSessionIds.length,
+    failCount: failedSessionIds.length,
+    successSessionIds,
+    failedSessionIds,
+    failedSessionErrors,
+    sessionOutputPaths: {
+      ...(weliveResult?.sessionOutputPaths || {}),
+      ...(fallbackResult?.sessionOutputPaths || {})
+    },
+    error: failedSessionIds.length > 0
+      ? (fallbackResult?.error || `兼容导出仍有 ${failedSessionIds.length} 个会话失败`)
+      : undefined
+  }
+}
+
+function findMissingExportOutputs(result: any): string[] {
+  const fs = require('fs') as typeof import('fs')
+  const successSessionIds = Array.isArray(result?.successSessionIds)
+    ? result.successSessionIds.map((id: unknown) => String(id || '').trim()).filter(Boolean)
+    : []
+  return successSessionIds.filter((sessionId: string) => {
+    const outputPath = String(result?.sessionOutputPaths?.[sessionId] || '').trim()
+    return !outputPath || !fs.existsSync(outputPath)
   })
+}
+
+function markMissingExportOutputsFailed(result: any, missingSessionIds: string[]) {
+  if (missingSessionIds.length === 0) return result
+  const missingIdSet = new Set(missingSessionIds)
+  const successSessionIds = (Array.isArray(result?.successSessionIds) ? result.successSessionIds : [])
+    .map((id: unknown) => String(id || '').trim())
+    .filter((id: string) => Boolean(id) && !missingIdSet.has(id))
+  const failedSessionIds = Array.from(new Set([
+    ...(Array.isArray(result?.failedSessionIds) ? result.failedSessionIds : []),
+    ...missingSessionIds
+  ].map((id) => String(id || '').trim()).filter(Boolean)))
+  const failedSessionErrors = { ...(result?.failedSessionErrors || {}) }
+  for (const sessionId of missingSessionIds) {
+    failedSessionErrors[sessionId] = '导出引擎未生成结果文件，请重试'
+  }
+  return {
+    ...result,
+    success: successSessionIds.length > 0,
+    successCount: successSessionIds.length,
+    failCount: failedSessionIds.length,
+    successSessionIds,
+    failedSessionIds,
+    failedSessionErrors,
+    error: `部分会话未生成结果文件（${missingSessionIds.length} 个），请重试`
+  }
 }
 
 async function run() {
   if (shouldUseWeliveEngine()) {
     const result = await runWeliveEngine()
     if (!shouldFallbackFromWeliveResult(result)) {
-      flushProgress()
-      flushCreatedPaths()
-      parentPort?.postMessage({
-        type: 'export:result',
-        data: result
-      })
+      postExportResult(result)
       return
     }
 
@@ -612,9 +698,38 @@ async function run() {
     })
     flushProgress()
     flushCreatedPaths()
+
+    const configuredSessionIds = (Array.isArray(config.sessionIds) ? config.sessionIds : [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)
+    const failedSessionIds = Array.from(new Set([
+      ...(Array.isArray(result?.failedSessionIds) ? result.failedSessionIds : []),
+      ...Object.keys(result?.failedSessionErrors || {})
+    ].map((id) => String(id || '').trim()).filter(Boolean)))
+    if (config.mode !== 'single' && failedSessionIds.length > 0 && failedSessionIds.length < configuredSessionIds.length) {
+      const fallbackResult = await runLegacyEngine(failedSessionIds)
+      let mergedResult = mergeWeliveFallbackResult(result, fallbackResult, failedSessionIds)
+      const missingOutputIds = findMissingExportOutputs(mergedResult)
+      if (missingOutputIds.length > 0) {
+        queueProgress({
+          current: mergedResult.successCount || 0,
+          total: configuredSessionIds.length,
+          phase: 'preparing',
+          phaseLabel: `检测到 ${missingOutputIds.length} 个结果文件缺失，正在重试`
+        })
+        flushProgress()
+        mergedResult = mergeWeliveFallbackResult(
+          mergedResult,
+          await runLegacyEngine(missingOutputIds),
+          missingOutputIds
+        )
+      }
+      postExportResult(markMissingExportOutputsFailed(mergedResult, findMissingExportOutputs(mergedResult)))
+      return
+    }
   }
 
-  await runLegacyEngine()
+  postExportResult(await runLegacyEngine())
 }
 
 run().catch((error) => {

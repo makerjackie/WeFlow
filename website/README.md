@@ -6,11 +6,11 @@
 
 ```sh
 wrangler r2 bucket create weflow-releases --location=apac
-wrangler r2 object put weflow-releases/releases/5.0.6/WeFlow-5.0.6-Setup.dmg \
+wrangler r2 object put weflow-releases/releases/5.0.7/WeFlow-5.0.7-Setup.dmg \
   --remote \
-  --file=release/WeFlow-5.0.6-Setup.dmg \
+  --file=release/WeFlow-5.0.7-Setup.dmg \
   --content-type=application/x-apple-diskimage \
-  --content-disposition='attachment; filename="WeFlow-5.0.6-Setup.dmg"' \
+  --content-disposition='attachment; filename="WeFlow-5.0.7-Setup.dmg"' \
   --cache-control='public, max-age=86400'
 wrangler deploy --config website/wrangler.jsonc
 ```

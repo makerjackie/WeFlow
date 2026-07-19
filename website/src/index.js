@@ -1,7 +1,12 @@
-const LATEST_DOWNLOAD = '/download/WeFlow-5.0.6-Setup.dmg'
+const LATEST_DOWNLOAD = '/download/WeFlow-5.0.7-Setup.dmg'
 
 const RELEASES = new Map([
   [LATEST_DOWNLOAD, {
+    key: 'releases/5.0.7/WeFlow-5.0.7-Setup.dmg',
+    filename: 'WeFlow-5.0.7-Setup.dmg',
+    sha256: 'defa3efbbbaf25649065099ad5506f3d8b18eec2d593d73324a85a4bc865a282'
+  }],
+  ['/download/WeFlow-5.0.6-Setup.dmg', {
     key: 'releases/5.0.6/WeFlow-5.0.6-Setup.dmg',
     filename: 'WeFlow-5.0.6-Setup.dmg',
     sha256: '7b5b0f26f8b89433ae922b7b2b86358acf3c223b5d1859bf75b9810b62b21dd3'

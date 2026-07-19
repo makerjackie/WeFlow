@@ -4024,6 +4024,8 @@ export class WcdbCore {
 
     const rows: any[] = []
     let matchedTables = 0
+    let successfulTables = 0
+    let failedQueries = 0
     let lastError = ''
     const queryBatchSize = 5000
     for (const dbPath of dbPaths) {
@@ -4036,20 +4038,58 @@ export class WcdbCore {
         const normalized = String(tableName || '').trim().toLowerCase()
         return normalized.startsWith('msg_') && acceptedSuffixes.has(normalized.slice(4))
       })
+      const name2IdTable = tablesResult.tables.find((tableName) => (
+        String(tableName || '').trim().toLowerCase() === 'name2id'
+      ))
+      const senderNameById = new Map<string, string>()
+      if (name2IdTable) {
+        const nameSql = `SELECT rowid AS sender_rowid, user_name AS sender_username FROM ${this.quoteSqlIdentifier(name2IdTable)}`
+        let nameResult = await this.execQuery('message', dbPath, nameSql)
+        if (!nameResult.success) {
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          nameResult = await this.execQuery('message', dbPath, nameSql)
+        }
+        if (nameResult.success && Array.isArray(nameResult.rows)) {
+          for (const row of nameResult.rows) {
+            const senderId = String(row?.sender_rowid ?? row?.rowid ?? '').trim()
+            const senderUsername = String(row?.sender_username ?? row?.user_name ?? '').trim()
+            if (senderId && senderUsername) senderNameById.set(senderId, senderUsername)
+          }
+        } else {
+          lastError = nameResult.error || lastError
+        }
+      }
       for (const tableName of tableNames) {
         matchedTables += 1
         let offset = 0
+        let tableSucceeded = false
         while (true) {
-          // The v4 message table stores only real_sender_id. Resolve it through
-          // Name2Id so compatibility exports can still distinguish self from
-          // the other participant when the native cursor is unavailable.
-          const sql = `SELECT m.*, n.user_name AS sender_username FROM ${this.quoteSqlIdentifier(tableName)} m LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid LIMIT ${queryBatchSize} OFFSET ${offset}`
-          const queryResult = await this.execQuery('message', dbPath, sql)
+          // Keep the message-table query simple. Joining Name2Id inside a large
+          // paged scan can intermittently return no data after the native
+          // account handle has been reopened. Resolve the sender from the
+          // separately loaded Name2Id map instead.
+          const sql = `SELECT * FROM ${this.quoteSqlIdentifier(tableName)} LIMIT ${queryBatchSize} OFFSET ${offset}`
+          let queryResult = await this.execQuery('message', dbPath, sql)
+          if (!queryResult.success) {
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            queryResult = await this.execQuery('message', dbPath, sql)
+          }
           if (!queryResult.success || !Array.isArray(queryResult.rows)) {
             lastError = queryResult.error || lastError
+            failedQueries += 1
             break
           }
-          const pageRows = this.filterSyntheticCursorRows(queryResult.rows, state)
+          if (!tableSucceeded) {
+            tableSucceeded = true
+            successfulTables += 1
+          }
+          const resolvedRows = queryResult.rows.map((row) => {
+            if (String(row?.sender_username || '').trim()) return row
+            const senderId = String(row?.real_sender_id ?? row?.realSenderId ?? '').trim()
+            const senderUsername = senderNameById.get(senderId)
+            return senderUsername ? { ...row, sender_username: senderUsername } : row
+          })
+          const pageRows = this.filterSyntheticCursorRows(resolvedRows, state)
           rows.push(...pageRows)
           if (queryResult.rows.length < queryBatchSize) break
           offset += queryResult.rows.length
@@ -4059,6 +4099,9 @@ export class WcdbCore {
 
     if (matchedTables === 0) {
       return { success: false, error: lastError || '兼容扫描未找到会话消息表' }
+    }
+    if (successfulTables === 0 || failedQueries > 0) {
+      return { success: false, error: lastError || '兼容扫描读取消息表失败' }
     }
     rows.sort((a, b) => {
       const direction = state.ascending ? 1 : -1
@@ -4248,6 +4291,9 @@ export class WcdbCore {
       const rows = this.parseMessageJson(jsonStr)
       if (nativeState && nativeState.offset === 0 && Array.isArray(rows) && rows.length === 0) {
         const loaded = await this.loadMessageRowsFromTables(nativeState)
+        if (!loaded.success) {
+          return { success: false, error: loaded.error || '兼容扫描读取消息失败' }
+        }
         if (loaded.success && Array.isArray(loaded.rows) && loaded.rows.length > 0) {
           nativeState.bufferedRows = loaded.rows
           const end = Math.min(nativeState.bufferedRows.length, nativeState.batchSize)

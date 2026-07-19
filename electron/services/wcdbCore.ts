@@ -4275,7 +4275,20 @@ export class WcdbCore {
       if (result !== 0 || !outPtr[0]) return { success: false, error: `获取消息库列表失败: ${result}` }
       const jsonStr = this.decodeJsonPtr(outPtr[0])
       if (!jsonStr) return { success: false, error: '解析消息库列表失败' }
-      const data = JSON.parse(jsonStr)
+      let data = JSON.parse(jsonStr)
+      if (!Array.isArray(data) || data.length === 0) {
+        const dbStoragePath = this.currentDbStoragePath || this.resolveDbStoragePath(
+          this.currentPath || '',
+          this.currentWxid || ''
+        )
+        const messageDir = dbStoragePath ? join(dbStoragePath, 'Message') : ''
+        if (messageDir && existsSync(messageDir)) {
+          data = readdirSync(messageDir)
+            .filter((name) => /^(?:biz_)?message(?:_\d+)?\.db$/i.test(name) && this.isRealDbFileName(name))
+            .map((name) => join(messageDir, name))
+            .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+        }
+      }
       return { success: true, data }
     } catch (e) {
       return { success: false, error: String(e) }

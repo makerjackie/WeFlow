@@ -299,7 +299,7 @@
       display: inline-flex;
       align-items: center;
       gap: 9px;
-      max-width: min(520px, calc(100% - 48px));
+      width: min(520px, calc(100% - 48px));
       min-height: 36px;
       padding: 8px 12px;
       border-radius: 18px;
@@ -348,6 +348,44 @@
         padding-left: 2px;
         color: var(--primary);
         font-weight: 600;
+      }
+
+      .st-metrics-status-content {
+        min-width: 0;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .st-metrics-status-line {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .st-metrics-progress-track {
+        position: relative;
+        height: 4px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--primary) 12%, var(--bg-main));
+
+        > span {
+          position: absolute;
+          inset: 0 auto 0 0;
+          min-width: 3px;
+          border-radius: inherit;
+          background: var(--primary);
+          transition: width 0.24s ease;
+        }
+
+        &.indeterminate > span {
+          width: 34%;
+          animation: stMetricsProgressIndeterminate 1.2s ease-in-out infinite;
+        }
       }
     }
   }
@@ -482,6 +520,11 @@
       color: var(--primary);
     }
   }
+}
+
+@keyframes stMetricsProgressIndeterminate {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(310%); }
 }
 
 // ── Skeleton Loading (参考「我的足迹」的 skeleton-shimmer 风格) ─────────

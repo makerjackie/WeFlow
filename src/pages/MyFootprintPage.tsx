@@ -90,6 +90,13 @@ interface MyFootprintData {
   diagnostics: MyFootprintDiagnostics
 }
 
+interface FootprintLoadProgress {
+  progress: number
+  message: string
+  current?: number
+  total?: number
+}
+
 interface TimelineBoundaryItem {
   kind: 'boundary'
   edge: 'start' | 'end'
@@ -339,6 +346,10 @@ function MyFootprintPage() {
   const [error, setError] = useState<string | null>(null)
   const [footprintAiStatus, setFootprintAiStatus] = useState<FootprintAiStatus>('idle')
   const [footprintAiText, setFootprintAiText] = useState('')
+  const [loadProgress, setLoadProgress] = useState<FootprintLoadProgress>({
+    progress: 0,
+    message: '正在准备统计...'
+  })
   const inflightRangeKeyRef = useRef<string | null>(null)
 
   const currentRange = useMemo(() => buildRange(preset, customStartDate, customEndDate), [preset, customStartDate, customEndDate])
@@ -360,7 +371,18 @@ function MyFootprintPage() {
     navigate(`/chat?${query.toString()}`)
   }, [navigate])
 
-  const loadData = useCallback(async () => {
+  useEffect(() => {
+    return window.electronAPI.chat.onMyFootprintProgress((payload) => {
+      setLoadProgress({
+        progress: Math.max(0, Math.min(100, Math.floor(Number(payload.progress || 0)))),
+        message: String(payload.message || '正在统计...'),
+        current: payload.current,
+        total: payload.total
+      })
+    })
+  }, [])
+
+  const loadData = useCallback(async (forceRefresh = false) => {
     const rangeKey = `${currentRange.begin}-${currentRange.end}`
     if (inflightRangeKeyRef.current === rangeKey) {
       return
@@ -368,8 +390,13 @@ function MyFootprintPage() {
     inflightRangeKeyRef.current = rangeKey
     setLoading(true)
     setError(null)
+    setLoadProgress({ progress: 2, message: '正在准备统计...' })
     try {
-      const result = await window.electronAPI.chat.getMyFootprintStats(currentRange.begin, currentRange.end)
+      const result = await window.electronAPI.chat.getMyFootprintStats(
+        currentRange.begin,
+        currentRange.end,
+        { forceRefresh }
+      )
       if (!result.success || !result.data) {
         setError(result.error || '读取统计失败')
         setData(EMPTY_DATA)
@@ -724,7 +751,7 @@ function MyFootprintPage() {
                 placeholder="搜索联系人/群聊/内容"
               />
             </div>
-            <button type="button" className="action-btn" onClick={() => void loadData()} disabled={loading}>
+            <button type="button" className="action-btn" onClick={() => void loadData(true)} disabled={loading}>
               <RefreshCw size={15} className={loading ? 'spin' : ''} />
               <span>刷新</span>
             </button>
@@ -746,6 +773,24 @@ function MyFootprintPage() {
 
       {loading ? (
         <section className="footprint-loading" aria-live="polite">
+          <div className="footprint-load-progress">
+            <div className="footprint-load-progress-head">
+              <span>{loadProgress.message}</span>
+              <strong>{loadProgress.progress}%</strong>
+            </div>
+            <div
+              className="footprint-load-progress-track"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={loadProgress.progress}
+            >
+              <span style={{ width: `${loadProgress.progress}%` }} />
+            </div>
+            {Number.isFinite(loadProgress.current) && Number.isFinite(loadProgress.total) && Number(loadProgress.total) > 0 && (
+              <small>{Math.min(Number(loadProgress.current), Number(loadProgress.total)).toLocaleString()} / {Number(loadProgress.total).toLocaleString()}</small>
+            )}
+          </div>
           <div className="kpi-skeleton-grid">
             {Array.from({ length: 4 }).map((_, index) => (
               <div key={index} className="kpi-skeleton-card skeleton-shimmer" />

@@ -351,6 +351,24 @@ interface MyFootprintData {
   diagnostics: MyFootprintDiagnostics
 }
 
+interface MyFootprintStatsOptions {
+  myWxid?: string
+  privateSessionIds?: string[]
+  groupSessionIds?: string[]
+  mentionLimit?: number
+  privateLimit?: number
+  mentionMode?: 'text_at_me' | string
+  forceRefresh?: boolean
+}
+
+interface MyFootprintProgress {
+  stage: 'preparing' | 'sessions' | 'private' | 'groups' | 'segments' | 'enrich' | 'cache' | 'done'
+  progress: number
+  message: string
+  current?: number
+  total?: number
+}
+
 // 表情包缓存
 const emojiCache: Map<string, string> = new Map()
 const emojiDownloading: Map<string, Promise<string | null>> = new Map()
@@ -458,6 +476,9 @@ class ChatService {
   private sessionsLoadInFlight: { scope: string; generation: number; promise: Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> } | null = null
   private sessionsCacheGeneration = 0
   private readonly sessionsMemoryCacheTtlMs = 30 * 1000
+  private myFootprintStatsCache = new Map<string, { updatedAt: number; data: MyFootprintData }>()
+  private myFootprintStatsInFlight = new Map<string, Promise<{ success: boolean; data?: MyFootprintData; error?: string }>>()
+  private readonly myFootprintStatsCacheTtlMs = 3 * 60 * 1000
   private syntheticUnreadRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private syntheticUnreadRefreshInFlight: Promise<void> | null = null
   private syntheticUnreadRefreshGeneration = 0
@@ -783,6 +804,8 @@ class ChatService {
     }
     this.connected = false
     this.monitorSetup = false
+    this.myFootprintStatsCache.clear()
+    this.myFootprintStatsInFlight.clear()
   }
 
   /**
@@ -2010,10 +2033,11 @@ class ChatService {
         return { success: true, counts: {} }
       }
 
+      this.refreshSessionMessageCountCacheScope()
+
       const preferHintCache = options?.preferHintCache !== false
       const bypassSessionCache = options?.bypassSessionCache === true
 
-      this.refreshSessionMessageCountCacheScope()
       const counts: Record<string, number> = {}
       const now = Date.now()
       const pendingSessionIds: string[] = []
@@ -4517,6 +4541,8 @@ class ChatService {
     this.messageTableColumnsCache.clear()
     this.messageDbCountSnapshotCache = null
     this.contactsMemoryCache.clear()
+    this.myFootprintStatsCache.clear()
+    this.myFootprintStatsInFlight.clear()
     this.invalidateSessionsMemoryCache()
     this.refreshSessionStatsCacheScope(scope)
     this.refreshGroupMyMessageCountCacheScope(scope)
@@ -5397,6 +5423,24 @@ class ChatService {
     const groupSessionIds = normalizedSessionIds.filter(sessionId => sessionId.endsWith('@chatroom'))
     const privateSessionIds = normalizedSessionIds.filter(sessionId => !sessionId.endsWith('@chatroom'))
 
+    // Warm the native message-table index before requesting the richer type
+    // breakdown. Without this pass, quick-mode may return a structurally valid
+    // row filled with zeroes on the first export-page visit, and that false zero
+    // can then be persisted in the stats cache.
+    let accurateMessageCountMap: Record<string, number> = {}
+    if (beginTimestamp <= 0 && endTimestamp <= 0) {
+      try {
+        const countResult = await this.getSessionMessageCounts(normalizedSessionIds, {
+          preferHintCache: false
+        })
+        if (countResult.success && countResult.counts) {
+          accurateMessageCountMap = countResult.counts
+        }
+      } catch {
+        accurateMessageCountMap = {}
+      }
+    }
+
     let memberCountMap: Record<string, number> = {}
     const shouldLoadGroupMemberCount = groupSessionIds.length > 0 && (includeRelations || normalizedSessionIds.length === 1)
     if (shouldLoadGroupMemberCount) {
@@ -5477,6 +5521,10 @@ class ChatService {
             beginTimestamp,
             endTimestamp
           )
+        const accurateMessageCount = Number(accurateMessageCountMap[sessionId])
+        if (Number.isFinite(accurateMessageCount) && accurateMessageCount >= 0) {
+          stats.totalMessages = Math.floor(accurateMessageCount)
+        }
         // 新版 native 批量统计会返回 file_messages；仅兼容旧 DLL 缺少该字段时再走 cursor 兜底。
         if (fromNativeBatch && !nativeBatchHasFileMessages[sessionId]) {
           try {
@@ -10290,20 +10338,75 @@ class ChatService {
   async getMyFootprintStats(
     beginTimestamp: number,
     endTimestamp: number,
-    options?: {
-      myWxid?: string
-      privateSessionIds?: string[]
-      groupSessionIds?: string[]
-      mentionLimit?: number
-      privateLimit?: number
-      mentionMode?: 'text_at_me' | string
-    }
+    options?: MyFootprintStatsOptions,
+    onProgress?: (progress: MyFootprintProgress) => void
   ): Promise<{ success: boolean; data?: MyFootprintData; error?: string }> {
+    const scope = `${String(this.configService.get('dbPath') || '')}::${String(this.configService.getMyWxidCleaned() || '')}`
+    const cacheKey = JSON.stringify({
+      scope,
+      beginTimestamp: this.normalizeTimestampSeconds(beginTimestamp),
+      endTimestamp: this.normalizeTimestampSeconds(endTimestamp),
+      myWxid: String(options?.myWxid || ''),
+      privateSessionIds: Array.from(new Set(options?.privateSessionIds || [])).sort(),
+      groupSessionIds: Array.from(new Set(options?.groupSessionIds || [])).sort(),
+      mentionLimit: Number(options?.mentionLimit || 0),
+      privateLimit: Number(options?.privateLimit || 0),
+      mentionMode: options?.mentionMode || 'text_at_me'
+    })
+    const cached = this.myFootprintStatsCache.get(cacheKey)
+    if (!options?.forceRefresh && cached && Date.now() - cached.updatedAt <= this.myFootprintStatsCacheTtlMs) {
+      onProgress?.({ stage: 'cache', progress: 100, message: '已读取最近一次统计缓存' })
+      return { success: true, data: cached.data }
+    }
+
+    const existing = this.myFootprintStatsInFlight.get(cacheKey)
+    if (existing && !options?.forceRefresh) {
+      onProgress?.({ stage: 'preparing', progress: 5, message: '正在复用相同范围的统计任务' })
+      return existing
+    }
+
+    const promise = this.getMyFootprintStatsFresh(beginTimestamp, endTimestamp, options, onProgress)
+    this.myFootprintStatsInFlight.set(cacheKey, promise)
     try {
+      const result = await promise
+      if (result.success && result.data) {
+        this.myFootprintStatsCache.set(cacheKey, { updatedAt: Date.now(), data: result.data })
+        while (this.myFootprintStatsCache.size > 8) {
+          const oldestKey = this.myFootprintStatsCache.keys().next().value
+          if (typeof oldestKey !== 'string') break
+          this.myFootprintStatsCache.delete(oldestKey)
+        }
+      }
+      return result
+    } finally {
+      if (this.myFootprintStatsInFlight.get(cacheKey) === promise) {
+        this.myFootprintStatsInFlight.delete(cacheKey)
+      }
+    }
+  }
+
+  private async getMyFootprintStatsFresh(
+    beginTimestamp: number,
+    endTimestamp: number,
+    options?: MyFootprintStatsOptions,
+    onProgress?: (progress: MyFootprintProgress) => void
+  ): Promise<{ success: boolean; data?: MyFootprintData; error?: string }> {
+    let lastReportedProgress = 0
+    const report = (payload: MyFootprintProgress) => {
+      const nextProgress = Math.max(
+        lastReportedProgress,
+        Math.max(0, Math.min(100, Math.floor(payload.progress)))
+      )
+      lastReportedProgress = nextProgress
+      onProgress?.({ ...payload, progress: nextProgress })
+    }
+    try {
+      report({ stage: 'preparing', progress: 3, message: '正在连接微信数据' })
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) {
         return { success: false, error: connectResult.error || '数据库未连接' }
       }
+      report({ stage: 'sessions', progress: 8, message: '正在读取会话范围' })
 
       const begin = this.normalizeTimestampSeconds(beginTimestamp)
       const end = this.normalizeTimestampSeconds(endTimestamp)
@@ -10366,6 +10469,14 @@ class ChatService {
         }
       }
 
+      report({
+        stage: 'sessions',
+        progress: 18,
+        message: `已定位 ${privateSessionIds.length + groupSessionIds.length} 个候选会话`,
+        current: privateSessionIds.length + groupSessionIds.length,
+        total: privateSessionIds.length + groupSessionIds.length
+      })
+
       const unresolvedOpenimPrivateSessionIds = privateSessionIds.filter((value) =>
         this.isEnterpriseOpenimUsername(value) && !privateSessionLocalTypeMap.has(value)
       )
@@ -10391,6 +10502,14 @@ class ChatService {
       }
 
       privateSessionIds = await this.filterMyFootprintPrivateSessions(privateSessionIds)
+
+      report({
+        stage: 'sessions',
+        progress: 28,
+        message: `准备扫描 ${privateSessionIds.length} 个私聊和 ${groupSessionIds.length} 个群聊`,
+        current: 0,
+        total: privateSessionIds.length + groupSessionIds.length
+      })
 
       let data: MyFootprintData | null = null
       const effectivePrivateLimit = privateLimit
@@ -10438,7 +10557,8 @@ class ChatService {
         let chunks = 0
         if (targetGroupSessionIds.length <= singleGroupThreshold) {
           chunks = targetGroupSessionIds.length
-          for (const sessionId of targetGroupSessionIds) {
+          for (let index = 0; index < targetGroupSessionIds.length; index += 1) {
+            const sessionId = targetGroupSessionIds[index]
             const chunkRaw = await runNativePass({
               label: `group-single:${sessionId}`,
               passPrivateSessionIds: [],
@@ -10449,11 +10569,19 @@ class ChatService {
             aggregated = aggregated
               ? this.mergeMyFootprintMentionResult(aggregated, chunkRaw)
               : chunkRaw
+            report({
+              stage: 'groups',
+              progress: 42 + Math.floor((index + 1) / Math.max(1, targetGroupSessionIds.length) * 36),
+              message: `正在扫描群聊 ${index + 1} / ${targetGroupSessionIds.length}`,
+              current: index + 1,
+              total: targetGroupSessionIds.length
+            })
           }
         } else {
           const groupChunks = splitGroupSessionsForNative(targetGroupSessionIds)
           chunks = groupChunks.length
-          for (const chunk of groupChunks) {
+          for (let index = 0; index < groupChunks.length; index += 1) {
+            const chunk = groupChunks[index]
             const chunkRaw = await runNativePass({
               label: `group-chunk:${chunk[0] || ''}..(${chunk.length})`,
               passPrivateSessionIds: [],
@@ -10464,6 +10592,13 @@ class ChatService {
             aggregated = aggregated
               ? this.mergeMyFootprintMentionResult(aggregated, chunkRaw)
               : chunkRaw
+            report({
+              stage: 'groups',
+              progress: 42 + Math.floor((index + 1) / Math.max(1, groupChunks.length) * 36),
+              message: `正在扫描群聊批次 ${index + 1} / ${groupChunks.length}`,
+              current: index + 1,
+              total: groupChunks.length
+            })
           }
         }
         return { raw: aggregated, chunks }
@@ -10516,6 +10651,7 @@ class ChatService {
       let mentionNativeRaw: MyFootprintData | null = null
 
       if (privateSessionIds.length > 0) {
+        report({ stage: 'private', progress: 32, message: `正在统计 ${privateSessionIds.length} 个私聊` })
         privateNativeRaw = await runNativePass({
           label: 'private',
           passPrivateSessionIds: privateSessionIds,
@@ -10523,9 +10659,11 @@ class ChatService {
           candidateLimit: 0,
           passPrivateLimit: effectivePrivateLimit
         })
+        report({ stage: 'private', progress: 40, message: '私聊统计完成' })
       }
 
       if (groupSessionIds.length > 0) {
+        report({ stage: 'groups', progress: 42, message: `正在扫描 ${groupSessionIds.length} 个群聊` })
         const firstPass = await runGroupPasses(groupSessionIds)
         mentionNativeRaw = firstPass.raw
         nativeGroupChunks = firstPass.chunks
@@ -10570,11 +10708,25 @@ class ChatService {
 
       if (data.private_sessions.length > 0) {
         const sessionsWithMessages = data.private_sessions.map(s => s.session_id)
+        report({
+          stage: 'segments',
+          progress: 82,
+          message: `正在整理私聊时间线 0 / ${sessionsWithMessages.length}`,
+          current: 0,
+          total: sessionsWithMessages.length
+        })
         const privateSegments = await this.rebuildMyFootprintPrivateSegments({
           begin,
           end: normalizedEnd,
           myWxid,
-          privateSessionIds: sessionsWithMessages
+          privateSessionIds: sessionsWithMessages,
+          onProgress: (current, total) => report({
+            stage: 'segments',
+            progress: 82 + Math.floor(current / Math.max(1, total) * 10),
+            message: `正在整理私聊时间线 ${current} / ${total}`,
+            current,
+            total
+          })
         })
         if (privateSegments.length > 0) {
           data = {
@@ -10609,7 +10761,9 @@ class ChatService {
         }
       }
 
+      report({ stage: 'enrich', progress: 94, message: '正在补充联系人和消息信息' })
       const enriched = await this.enrichMyFootprintData(data)
+      report({ stage: 'done', progress: 100, message: '统计完成' })
       return { success: true, data: enriched }
     } catch (error) {
       console.error('[ChatService] 获取我的足迹统计失败:', error)
@@ -10673,6 +10827,7 @@ class ChatService {
     end: number
     myWxid: string
     privateSessionIds: string[]
+    onProgress?: (current: number, total: number) => void
   }): Promise<MyFootprintPrivateSegment[]> {
     const sessionGapSeconds = 5 * 60
     const segments: MyFootprintPrivateSegment[] = []
@@ -10691,7 +10846,8 @@ class ChatService {
       latest_create_time: number
     }
 
-    for (const sessionId of params.privateSessionIds) {
+    for (let sessionIndex = 0; sessionIndex < params.privateSessionIds.length; sessionIndex += 1) {
+      const sessionId = params.privateSessionIds[sessionIndex]
       const cursorResult = await wcdbService.openMessageCursor(
         sessionId,
         360,
@@ -10701,6 +10857,7 @@ class ChatService {
       )
       if (!cursorResult.success || !cursorResult.cursor) {
         console.log(`[足迹分段] 打开游标失败: ${sessionId}, 原因: ${cursorResult.error || '未知'}`)
+        params.onProgress?.(sessionIndex + 1, params.privateSessionIds.length)
         continue
       }
 
@@ -10826,6 +10983,7 @@ class ChatService {
       }
 
       commit()
+      params.onProgress?.(sessionIndex + 1, params.privateSessionIds.length)
     }
 
     return segments.sort((a, b) => {

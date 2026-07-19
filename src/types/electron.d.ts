@@ -835,6 +835,7 @@ export interface ElectronAPI {
         mentionLimit?: number
         privateLimit?: number
         mentionMode?: 'text_at_me' | string
+        forceRefresh?: boolean
       }
     ) => Promise<{
       success: boolean
@@ -904,6 +905,13 @@ export interface ElectronAPI {
       }
       error?: string
     }>
+    onMyFootprintProgress: (callback: (payload: {
+      stage: 'preparing' | 'sessions' | 'private' | 'groups' | 'segments' | 'enrich' | 'cache' | 'done'
+      progress: number
+      message: string
+      current?: number
+      total?: number
+    }) => void) => () => void
     exportMyFootprint: (
       beginTimestamp: number,
       endTimestamp: number,

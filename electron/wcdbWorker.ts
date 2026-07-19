@@ -1,7 +1,105 @@
 import { parentPort, workerData } from 'worker_threads'
+import { createHash } from 'crypto'
 import { WcdbCore } from './services/wcdbCore'
 
 const core = new WcdbCore()
+
+const quoteSqlIdentifier = (value: string): string => `"${String(value || '').replace(/"/g, '""')}"`
+const escapeSqlString = (value: string): string => String(value || '').replace(/'/g, "''")
+
+const countSessionsByTableScan = async (
+    sessionIds: string[]
+): Promise<{ success: boolean; counts?: Record<string, number>; error?: string }> => {
+    const normalizedIds = Array.from(new Set(
+        (sessionIds || []).map(id => String(id || '').trim()).filter(Boolean)
+    ))
+    const counts = Object.fromEntries(normalizedIds.map(id => [id, 0])) as Record<string, number>
+    if (normalizedIds.length === 0) return { success: true, counts }
+
+    const fullHashLookup = new Map<string, string>()
+    const shortHashLookup = new Map<string, string | null>()
+    for (const sessionId of normalizedIds) {
+        const hash = createHash('md5').update(sessionId).digest('hex').toLowerCase()
+        fullHashLookup.set(hash, sessionId)
+        const shortHash = hash.slice(0, 16)
+        const existing = shortHashLookup.get(shortHash)
+        shortHashLookup.set(shortHash, existing === undefined || existing === sessionId ? sessionId : null)
+    }
+
+    const matchSessionId = (tableName: string): string | null => {
+        const normalized = String(tableName || '').trim().toLowerCase()
+        if (!normalized.startsWith('msg_')) return null
+        const suffix = normalized.slice(4)
+        const full = fullHashLookup.get(suffix)
+        if (full) return full
+        const short = shortHashLookup.get(suffix.slice(0, 16))
+        return typeof short === 'string' ? short : null
+    }
+
+    let dbResult = await core.listMessageDbs()
+    if (dbResult.success && Array.isArray(dbResult.data) && dbResult.data.length === 0) {
+        for (const sessionId of normalizedIds.slice(0, 48)) {
+            const probe = await core.getMessages(sessionId, 1, 0)
+            if (probe.success && Array.isArray(probe.messages) && probe.messages.length > 0) break
+        }
+        dbResult = await core.listMessageDbs()
+    }
+    if (!dbResult.success || !Array.isArray(dbResult.data)) {
+        return { success: false, error: dbResult.error || '获取消息数据库列表失败' }
+    }
+
+    let listedDatabaseCount = 0
+    let matchedTableCount = 0
+    let successfulQueryCount = 0
+    let lastError = ''
+    for (const dbPathValue of dbResult.data) {
+        const dbPath = String(dbPathValue || '').trim()
+        if (!dbPath) continue
+        const tablesResult = await core.listTables('message', dbPath)
+        if (!tablesResult.success || !Array.isArray(tablesResult.tables)) {
+            lastError = tablesResult.error || lastError
+            continue
+        }
+        listedDatabaseCount += 1
+
+        const matchedTables = tablesResult.tables
+            .map(tableName => ({ tableName: String(tableName || '').trim(), sessionId: matchSessionId(tableName) }))
+            .filter((item): item is { tableName: string; sessionId: string } => Boolean(item.tableName && item.sessionId))
+        matchedTableCount += matchedTables.length
+
+        // Keep each compound query comfortably below SQLite's compound-select
+        // limit while counting every matched Msg table in one pass per chunk.
+        const queryChunkSize = 80
+        for (let offset = 0; offset < matchedTables.length; offset += queryChunkSize) {
+            const chunk = matchedTables.slice(offset, offset + queryChunkSize)
+            const sql = chunk.map(({ tableName }) => (
+                `SELECT '${escapeSqlString(tableName)}' AS table_name, COUNT(*) AS cnt FROM ${quoteSqlIdentifier(tableName)}`
+            )).join(' UNION ALL ')
+            const queryResult = await core.execQuery('message', dbPath, sql)
+            if (!queryResult.success || !Array.isArray(queryResult.rows)) {
+                lastError = queryResult.error || lastError
+                continue
+            }
+            successfulQueryCount += 1
+            for (const row of queryResult.rows as Record<string, unknown>[]) {
+                const sessionId = matchSessionId(String(row.table_name || ''))
+                if (!sessionId) continue
+                const rawCount = Number(row.cnt || 0)
+                if (Number.isFinite(rawCount) && rawCount > 0) {
+                    counts[sessionId] += Math.floor(rawCount)
+                }
+            }
+        }
+    }
+
+    if (dbResult.data.length > 0 && listedDatabaseCount === 0) {
+        return { success: false, error: lastError || '无法读取消息表列表' }
+    }
+    if (matchedTableCount > 0 && successfulQueryCount === 0) {
+        return { success: false, error: lastError || '无法统计消息表' }
+    }
+    return { success: true, counts }
+}
 
 // The native layer populates its message database registry lazily. Keep the
 // refresh and the dependent operation in the same queued job so no contact,
@@ -58,6 +156,19 @@ if (parentPort) {
         const index = await core.listMessageDbs()
         messageDbIndexReady = Boolean(index.success && Array.isArray(index.data) && index.data.length > 0)
         return messageDbIndexReady
+    }
+
+    const warmSessionHashLookup = async (sessionIds: string[]): Promise<boolean> => {
+        const candidates = Array.from(new Set(
+            (sessionIds || []).map(id => String(id || '').trim()).filter(Boolean)
+        )).slice(0, 48)
+        for (const sessionId of candidates) {
+            const probe = await core.getMessages(sessionId, 1, 0)
+            if (probe.success && Array.isArray(probe.messages) && probe.messages.length > 0) {
+                return true
+            }
+        }
+        return false
     }
 
     const handleMessage = async (msg: any): Promise<void> => {
@@ -149,12 +260,22 @@ if (parentPort) {
                     result = await core.getMessageCounts(payload.sessionIds)
                     break
                 case 'getSessionMessageCounts':
-                    result = await core.getSessionMessageCounts(payload.sessionIds)
+                    {
+                    const sessionIds = Array.from(new Set(
+                        (payload.sessionIds || []).map((id: unknown) => String(id || '').trim()).filter(Boolean)
+                    )) as string[]
+                    // The native aggregate APIs can return a structurally valid
+                    // all-zero map on a cold connection. Count the concrete Msg
+                    // tables instead; this is deterministic and also works for
+                    // sessions spread across more than one message database.
+                    result = await countSessionsByTableScan(sessionIds)
                     break
+                    }
                 case 'getSessionMessageTypeStats':
                     result = await core.getSessionMessageTypeStats(payload.sessionId, payload.beginTimestamp, payload.endTimestamp)
                     break
                 case 'getSessionMessageTypeStatsBatch':
+                    await warmSessionHashLookup(payload.sessionIds || [])
                     result = await core.getSessionMessageTypeStatsBatch(payload.sessionIds, payload.options)
                     break
                 case 'getSessionMessageDateCounts':

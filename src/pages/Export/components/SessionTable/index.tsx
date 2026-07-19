@@ -2,7 +2,7 @@ import React, { memo, useRef, useCallback, useEffect, useState } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { Search, X, CheckSquare, Square, RefreshCw } from 'lucide-react'
 import type { SessionRow, ConversationTab, ContactsSortConfig } from '../../types'
-import type { SessionContentMetric } from '../../hooks/useSessionMetrics'
+import type { SessionContentMetric, SessionMetricsProgress } from '../../hooks/useSessionMetrics'
 import { conversationTabLabels, exportKindPriority } from '../../constants'
 import { getAvatarLetter } from '../../utils/format'
 import { formatLatestMessageTimeFromSeconds } from '../../utils/format'
@@ -26,7 +26,10 @@ interface SessionTableProps {
   error?: string | null
   metricsMap?: Record<string, SessionContentMetric>
   loadingRefs?: Set<string>
-  metricsLoadingCount?: number
+  messageCountLoadingRefs?: Set<string>
+  messageCountProgress?: SessionMetricsProgress
+  detailProgress?: SessionMetricsProgress
+  onVisibleSessionIdsChange?: (sessionIds: string[]) => void
   onRefreshStats?: () => void
   isRefreshingStats?: boolean
 }
@@ -48,14 +51,17 @@ const SessionTable: React.FC<SessionTableProps> = ({
   error,
   metricsMap,
   loadingRefs,
-  metricsLoadingCount = 0,
+  messageCountLoadingRefs,
+  messageCountProgress = { active: false, completed: 0, total: 0 },
+  detailProgress = { active: false, completed: 0, total: 0 },
+  onVisibleSessionIdsChange,
   onRefreshStats,
   isRefreshingStats = false
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const [isStatsNoticeMounted, setIsStatsNoticeMounted] = useState(false)
   const [isStatsNoticeLeaving, setIsStatsNoticeLeaving] = useState(false)
-  const isMetricsScanning = metricsLoadingCount > 0
+  const isMetricsScanning = messageCountProgress.active || detailProgress.active
 
   useEffect(() => {
     if (isMetricsScanning) {
@@ -105,6 +111,13 @@ const SessionTable: React.FC<SessionTableProps> = ({
     }
     onSelectionChange(next)
   }, [selectedSessionIds, onSelectionChange])
+
+  const handleVisibleRangeChange = useCallback((range: { startIndex: number; endIndex: number }) => {
+    if (!onVisibleSessionIdsChange || sessions.length === 0) return
+    const start = Math.max(0, range.startIndex - 6)
+    const end = Math.min(sessions.length, range.endIndex + 13)
+    onVisibleSessionIdsChange(sessions.slice(start, end).map(session => session.username))
+  }, [onVisibleSessionIdsChange, sessions])
 
   // Tabs layout
   const tabs: ConversationTab[] = ['private', 'group', 'official', 'former_friend']
@@ -243,12 +256,20 @@ const SessionTable: React.FC<SessionTableProps> = ({
           <Virtuoso
             ref={virtuosoRef}
             data={sessions}
+            rangeChanged={handleVisibleRangeChange}
             itemContent={(index, session) => {
               if (!session) return null
 
               const metrics = metricsMap?.[session.username]
-              const isMetricsLoading = !metrics && loadingRefs?.has(session.username)
-              const totalCount = metrics?.totalMessages ?? session.messageCountHint ?? 0
+              const isMetricsLoading = loadingRefs?.has(session.username) === true
+              const isMessageCountLoading = messageCountLoadingRefs?.has(session.username) === true
+              const hasExactTotal = metrics?.totalMessages !== undefined
+              const hintedTotal = Number(session.messageCountHint || 0)
+              const totalCount = hasExactTotal
+                ? Math.max(0, Math.floor(Number(metrics?.totalMessages || 0)))
+                : hintedTotal > 0
+                  ? Math.floor(hintedTotal)
+                  : 0
               const sessionDisplayName = displayNameOrFallback(session.username, session.displayName)
 
               return (
@@ -276,7 +297,7 @@ const SessionTable: React.FC<SessionTableProps> = ({
                     </div>
                   </div>
                   <div className="col-count">
-                    {isMetricsLoading ? (
+                    {isMessageCountLoading && !hasExactTotal && hintedTotal <= 0 ? (
                       <span className="st-stat-shimmer" />
                     ) : (
                       <span className="st-stat-fade-in">{totalCount.toLocaleString()}</span>
@@ -343,8 +364,23 @@ const SessionTable: React.FC<SessionTableProps> = ({
             aria-live="polite"
           >
             <span className="st-metrics-status-dot" />
-            <span>正在统计会话消息，已完成的结果会逐行更新</span>
-            <span className="st-metrics-status-count">{metricsLoadingCount.toLocaleString()} 项</span>
+            <div className="st-metrics-status-content">
+              <div className="st-metrics-status-line">
+                <span>{messageCountProgress.active ? '正在读取总消息数' : '正在补充当前可见会话的媒体统计'}</span>
+                <span className="st-metrics-status-count">
+                  {messageCountProgress.active
+                    ? `共 ${messageCountProgress.total.toLocaleString()} 项`
+                    : `${Math.min(detailProgress.completed, detailProgress.total).toLocaleString()} / ${detailProgress.total.toLocaleString()}`}
+                </span>
+              </div>
+              <div className={`st-metrics-progress-track ${messageCountProgress.active ? 'indeterminate' : ''}`}>
+                <span
+                  style={messageCountProgress.active
+                    ? undefined
+                    : { width: `${detailProgress.total > 0 ? Math.min(100, Math.round(detailProgress.completed / detailProgress.total * 100)) : 0}%` }}
+                />
+              </div>
+            </div>
           </div>
         )}
       </div>

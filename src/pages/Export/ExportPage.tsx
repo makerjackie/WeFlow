@@ -46,7 +46,7 @@ function ExportPage() {
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false)
   const [draftAutomationPayload, setDraftAutomationPayload] = useState<any>(null)
   const [pendingSingleExportRequest, setPendingSingleExportRequest] = useState<OpenSingleExportPayload | null>(null)
-  const [metricsMapForSort, setMetricsMapForSort] = useState<Record<string, any>>({})
+  const [visibleSessionIds, setVisibleSessionIds] = useState<string[]>([])
 
   const { 
     isLoaded: isConfigLoaded,
@@ -69,7 +69,15 @@ function ExportPage() {
   } = useContactsLoader()
 
   // ── 3. Metrics ──
-  const { metricsMap, fetchMetrics, loadingRefs } = useSessionMetrics()
+  const {
+    metricsMap,
+    fetchMessageCounts,
+    fetchMetrics,
+    loadingRefs,
+    messageCountLoadingRefs,
+    messageCountProgress,
+    detailProgress
+  } = useSessionMetrics()
 
   const {
     sessions,
@@ -83,7 +91,7 @@ function ExportPage() {
     loadSessions,
     sortConfig,
     setSortConfig
-  } = useExportSessions(contactMap, 'private', loadingRefs.size > 0 ? metricsMapForSort : metricsMap)
+  } = useExportSessions(contactMap, 'private', metricsMap)
 
   // Initial load
   useEffect(() => {
@@ -97,12 +105,6 @@ function ExportPage() {
   const displayedSessions = filteredSessions
 
   useEffect(() => {
-    if (loadingRefs.size === 0) {
-      setMetricsMapForSort(metricsMap)
-    }
-  }, [loadingRefs.size, metricsMap])
-
-  useEffect(() => {
     if (selectedSessionIds.size === 0) return
     const visibleIds = new Set(displayedSessions.map(session => session.username))
     const nextSelectedIds = new Set(Array.from(selectedSessionIds).filter(id => visibleIds.has(id)))
@@ -112,16 +114,31 @@ function ExportPage() {
   }, [displayedSessions, selectedSessionIds])
 
   useEffect(() => {
-    if (displayedSessions.length > 0) {
-      // Fetch metrics for displayed sessions (in chunks if needed, here we just pass all)
-      fetchMetrics(displayedSessions.map(s => s.username))
+    if (sessions.length > 0) {
+      void fetchMessageCounts(sessions.map(session => session.username))
     }
-  }, [displayedSessions, fetchMetrics])
+  }, [sessions, fetchMessageCounts])
+
+  useEffect(() => {
+    if (visibleSessionIds.length > 0) {
+      void fetchMetrics(visibleSessionIds)
+    }
+  }, [fetchMetrics, visibleSessionIds])
+
+  const handleVisibleSessionIdsChange = useCallback((nextIds: string[]) => {
+    setVisibleSessionIds(current => {
+      if (current.length === nextIds.length && current.every((id, index) => id === nextIds[index])) return current
+      return nextIds
+    })
+  }, [])
 
   const handleRefreshStats = useCallback(() => {
-    if (displayedSessions.length === 0 || loadingRefs.size > 0) return
-    void fetchMetrics(displayedSessions.map(s => s.username), { forceRefresh: true })
-  }, [displayedSessions, fetchMetrics, loadingRefs.size])
+    if (sessions.length === 0 || messageCountProgress.active || detailProgress.active) return
+    void Promise.all([
+      fetchMessageCounts(sessions.map(session => session.username), { forceRefresh: true }),
+      fetchMetrics(visibleSessionIds, { forceRefresh: true })
+    ])
+  }, [detailProgress.active, fetchMessageCounts, fetchMetrics, messageCountProgress.active, sessions, visibleSessionIds])
 
   // ── 4. Manage Tasks ──
   const {
@@ -342,9 +359,12 @@ function ExportPage() {
             error={sessionsError}
             metricsMap={metricsMap}
             loadingRefs={loadingRefs}
-            metricsLoadingCount={loadingRefs.size}
+            messageCountLoadingRefs={messageCountLoadingRefs}
+            messageCountProgress={messageCountProgress}
+            detailProgress={detailProgress}
+            onVisibleSessionIdsChange={handleVisibleSessionIdsChange}
             onRefreshStats={handleRefreshStats}
-            isRefreshingStats={loadingRefs.size > 0}
+            isRefreshingStats={messageCountProgress.active || detailProgress.active}
             onSingleExport={handleSingleExport}
             onBatchExport={handleExportSelected}
             onAutomationExport={handleAutomationExportFromSelection}

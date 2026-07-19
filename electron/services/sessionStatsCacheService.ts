@@ -5,10 +5,9 @@ import { app } from 'electron'
 import { ConfigService } from './config'
 
 /** 缓存版本号。增加/修改 SessionStatsCacheStats 字段后必须提升，避免旧缓存被误用。 */
-// v6 invalidates zero-valued entries written before the native message database
-// index had been initialized during connection startup. Version 5 shipped in an
-// internal test build that could still persist those zeros.
-const CACHE_VERSION = 6
+// v13 invalidates zero rows produced by the native batch-count API before the
+// deterministic message-table scan was added.
+const CACHE_VERSION = 13
 const MAX_SESSION_ENTRIES_PER_SCOPE = 2000
 const MAX_SCOPE_ENTRIES = 12
 

@@ -3085,15 +3085,18 @@ function registerIpcHandlers() {
     return chatService.searchMessages(keyword, sessionId, limit, offset, beginTimestamp, endTimestamp)
   })
 
-  ipcMain.handle('chat:getMyFootprintStats', async (_, beginTimestamp: number, endTimestamp: number, options?: {
+  ipcMain.handle('chat:getMyFootprintStats', async (event, beginTimestamp: number, endTimestamp: number, options?: {
     myWxid?: string
     privateSessionIds?: string[]
     groupSessionIds?: string[]
     mentionLimit?: number
     privateLimit?: number
     mentionMode?: 'text_at_me' | string
+    forceRefresh?: boolean
   }) => {
-    return chatService.getMyFootprintStats(beginTimestamp, endTimestamp, options)
+    return chatService.getMyFootprintStats(beginTimestamp, endTimestamp, options, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send('chat:myFootprintProgress', progress)
+    })
   })
 
   ipcMain.handle('chat:exportMyFootprint', async (_, beginTimestamp: number, endTimestamp: number, format: 'csv' | 'json', filePath: string) => {

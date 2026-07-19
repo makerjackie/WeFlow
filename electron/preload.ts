@@ -314,8 +314,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
         mentionLimit?: number
         privateLimit?: number
         mentionMode?: 'text_at_me' | string
+        forceRefresh?: boolean
       }
     ) => ipcRenderer.invoke('chat:getMyFootprintStats', beginTimestamp, endTimestamp, options),
+    onMyFootprintProgress: (callback: (payload: {
+      stage: 'preparing' | 'sessions' | 'private' | 'groups' | 'segments' | 'enrich' | 'cache' | 'done'
+      progress: number
+      message: string
+      current?: number
+      total?: number
+    }) => void) => {
+      const listener = (_: any, payload: any) => callback(payload)
+      ipcRenderer.on('chat:myFootprintProgress', listener)
+      return () => ipcRenderer.removeListener('chat:myFootprintProgress', listener)
+    },
     exportMyFootprint: (
       beginTimestamp: number,
       endTimestamp: number,

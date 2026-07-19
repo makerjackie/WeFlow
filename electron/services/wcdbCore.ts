@@ -4040,7 +4040,10 @@ export class WcdbCore {
         matchedTables += 1
         let offset = 0
         while (true) {
-          const sql = `SELECT * FROM ${this.quoteSqlIdentifier(tableName)} LIMIT ${queryBatchSize} OFFSET ${offset}`
+          // The v4 message table stores only real_sender_id. Resolve it through
+          // Name2Id so compatibility exports can still distinguish self from
+          // the other participant when the native cursor is unavailable.
+          const sql = `SELECT m.*, n.user_name AS sender_username FROM ${this.quoteSqlIdentifier(tableName)} m LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid LIMIT ${queryBatchSize} OFFSET ${offset}`
           const queryResult = await this.execQuery('message', dbPath, sql)
           if (!queryResult.success || !Array.isArray(queryResult.rows)) {
             lastError = queryResult.error || lastError

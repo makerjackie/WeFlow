@@ -116,6 +116,19 @@ export class ExportContext {
         return String(this.runtimeConfig?.myWxid || this.configService.getMyWxidCleaned() || '').trim()
     }
 
+    private resolveMessageIsSend(rawIsSend: unknown, senderUsername: unknown, cleanedMyWxid: string): boolean {
+        const rawValue = typeof rawIsSend === 'boolean'
+          ? (rawIsSend ? 1 : 0)
+          : Number.parseInt(String(rawIsSend ?? ''), 10)
+        if (rawValue === 1) return true
+
+        // Direct table scans do not have the native cursor's computed_is_send
+        // column. In that path sender_username is the reliable identity signal:
+        // outgoing rows carry the current account wxid.
+        const sender = String(senderUsername || '').trim()
+        return Boolean(sender && cleanedMyWxid && isSameWxid(sender, cleanedMyWxid))
+    }
+
     private getConfiguredAccountDir(): string {
         const explicit = String(this.runtimeConfig?.accountDir || '').trim()
         if (explicit) return explicit
@@ -894,8 +907,8 @@ export class ExportContext {
             if (localType <= 0) {
               localType = mediaType === 'video' ? 43 : 3
             }
-            const isSend = Number(item?.isSend) === 1
             const senderUsernameRaw = String(item?.senderUsername || '').trim()
+            const isSend = this.resolveMessageIsSend(item?.isSend, senderUsernameRaw, cleanedMyWxid)
             const actualSender = isSend ? cleanedMyWxid : (senderUsernameRaw || sessionId)
             if (normalizedSenderUsernameFilter && !isSameWxid(actualSender, normalizedSenderUsernameFilter)) {
               continue
@@ -4262,9 +4275,9 @@ export class ExportContext {
             const allowFileProbe = fileOnlyMediaFilter && this.hasFileAppMessageHints(row)
             if (mediaTypeFilter && !mediaTypeFilter.has(localType) && !allowFileProbe) continue
 
-            const isSendRaw = row.computed_is_send ?? row.is_send ?? row.isSend ?? '0'
-            const isSend = parseInt(String(isSendRaw), 10) === 1 || isSendRaw === true
             const senderUsername = String(row.sender_username ?? row.senderUsername ?? row.talker ?? '').trim()
+            const isSendRaw = row.computed_is_send ?? row.is_send ?? row.isSend
+            const isSend = this.resolveMessageIsSend(isSendRaw, senderUsername, cleanedMyWxid)
             let actualSender: string
             if (localType === 10000 || localType === 266287972401) {
               const revokeInfo = this.extractRevokerInfo(String(content || ''))
@@ -4530,8 +4543,8 @@ export class ExportContext {
                 ? decodeMessageContent(row.message_content, row.compress_content)
                 : ''
               const senderUsername = row.sender_username || ''
-              const isSendRaw = row.computed_is_send ?? row.is_send ?? '0'
-              const isSend = parseInt(isSendRaw, 10) === 1
+              const isSendRaw = row.computed_is_send ?? row.is_send
+              const isSend = this.resolveMessageIsSend(isSendRaw, senderUsername, cleanedMyWxid)
               const localId = this.getIntFromRow(row, [
                 'local_id', 'localId', 'LocalId',
                 'msg_local_id', 'msgLocalId', 'MsgLocalId',

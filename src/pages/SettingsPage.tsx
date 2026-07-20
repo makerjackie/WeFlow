@@ -302,9 +302,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
   // AI 见解 state
   const [aiInsightEnabled, setAiInsightEnabled] = useState(false)
-  const [aiModelApiBaseUrl, setAiModelApiBaseUrl] = useState('')
+  const [aiModelApiBaseUrl, setAiModelApiBaseUrl] = useState('https://api.deepseek.com')
   const [aiModelApiKey, setAiModelApiKey] = useState('')
-  const [aiModelApiModel, setAiModelApiModel] = useState('gpt-4o-mini')
+  const [aiModelApiModel, setAiModelApiModel] = useState('deepseek-v4-flash')
   const [aiModelApiMaxTokens, setAiModelApiMaxTokens] = useState(1024)
   const [aiInsightSilenceDays, setAiInsightSilenceDays] = useState(3)
   const [aiInsightAllowContext, setAiInsightAllowContext] = useState(false)
@@ -3013,13 +3013,13 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
           这是「AI 见解」与「AI 足迹总结」共享的模型接入配置。填写 OpenAI 兼容接口的 <strong>Base URL</strong>，末尾<strong>不要加斜杠</strong>。
           程序会自动拼接 <code>/chat/completions</code>。
           <br />
-          示例：<code>https://api.ohmygpt.com/v1</code> 或 <code>https://api.openai.com/v1</code>
+          默认使用 DeepSeek：<code>https://api.deepseek.com</code>。也可填写其他 OpenAI 兼容地址。
         </span>
         <input
           type="text"
           className="field-input"
           value={aiModelApiBaseUrl}
-          placeholder="https://api.ohmygpt.com/v1"
+          placeholder="https://api.deepseek.com"
           onChange={(e) => {
             const val = e.target.value
             setAiModelApiBaseUrl(val)
@@ -3073,15 +3073,15 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         <span className="form-hint">
           填写你的 API 提供商支持的模型名，将同时用于见解和足迹模块。
           <br />
-          常用示例：<code>gpt-4o-mini</code>、<code>gpt-4o</code>、<code>deepseek-chat</code>、<code>claude-3-5-haiku-20241022</code>
+          默认：<code>deepseek-v4-flash</code>。也可填写 API 提供商支持的其他模型名。
         </span>
         <input
           type="text"
           className="field-input"
           value={aiModelApiModel}
-          placeholder="gpt-4o-mini"
+          placeholder="deepseek-v4-flash"
           onChange={(e) => {
-            const val = e.target.value.trim() || 'gpt-4o-mini'
+            const val = e.target.value.trim() || 'deepseek-v4-flash'
             setAiModelApiModel(val)
             scheduleConfigSave('aiModelApiModel', () => configService.setAiModelApiModel(val))
           }}
@@ -5679,7 +5679,6 @@ JSON 输出格式：
 }
 
 export default SettingsPage
-
 
 
 

@@ -421,6 +421,40 @@
   gap: 8px;
 }
 
+.ai-onboarding-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 6px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border-color));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary) 7%, var(--bg-primary));
+  color: var(--primary);
+
+  svg {
+    flex: 0 0 auto;
+    margin-top: 1px;
+  }
+
+  div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  strong {
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  span {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+}
+
 .field-label {
   font-size: 13px;
   font-weight: 600;

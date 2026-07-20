@@ -357,6 +357,7 @@ export interface ElectronAPI {
   }
   shell: {
     openPath: (path: string) => Promise<string>
+    showItemInFolder: (path: string) => Promise<{ success: boolean; error?: string }>
     openExternal: (url: string) => Promise<{ success: boolean; error?: string }>
   }
   app: {
@@ -601,7 +602,7 @@ export interface ElectronAPI {
     }>
     enrichSessionsContactInfo: (
       usernames: string[],
-      options?: { skipDisplayName?: boolean; onlyMissingAvatar?: boolean }
+      options?: { skipDisplayName?: boolean; onlyMissingAvatar?: boolean; skipAvatar?: boolean }
     ) => Promise<{
       success: boolean
       contacts?: Record<string, { displayName?: string; avatarUrl?: string }>

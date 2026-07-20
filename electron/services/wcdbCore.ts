@@ -549,24 +549,42 @@ export class WcdbCore {
     if (depth > 5) return null
 
     try {
-      const entries = readdirSync(dir)
+      // 微信 4.x 的标准路径固定在 db_storage/session/session.db。
+      // 先命中已知路径，避免同步递归扫描 message/media 等巨型目录，
+      // 否则主进程启动时可能被 readdirSync 阻塞数分钟。
+      const knownCandidates = [
+        join(dir, 'session.db'),
+        join(dir, 'session', 'session.db'),
+        join(dir, 'Session', 'session.db')
+      ]
+      for (const candidate of knownCandidates) {
+        try {
+          if (existsSync(candidate) && statSync(candidate).isFile()) {
+            return candidate
+          }
+        } catch { }
+      }
+
+      const entries = readdirSync(dir, { withFileTypes: true })
 
       for (const entry of entries) {
-        if (entry.toLowerCase() === 'session.db') {
-          const fullPath = join(dir, entry)
-          if (statSync(fullPath).isFile()) {
+        if (entry.name.toLowerCase() === 'session.db') {
+          const fullPath = join(dir, entry.name)
+          if (entry.isFile()) {
             return fullPath
           }
         }
       }
 
-      for (const entry of entries) {
-        const fullPath = join(dir, entry)
+      const directories = entries
+        .filter((entry) => entry.isDirectory())
+        .sort((a, b) => Number(!a.name.toLowerCase().includes('session')) - Number(!b.name.toLowerCase().includes('session')))
+
+      for (const entry of directories) {
+        const fullPath = join(dir, entry.name)
         try {
-          if (statSync(fullPath).isDirectory()) {
-            const found = this.findSessionDb(fullPath, depth + 1)
-            if (found) return found
-          }
+          const found = this.findSessionDb(fullPath, depth + 1)
+          if (found) return found
         } catch { }
       }
     } catch (e) {

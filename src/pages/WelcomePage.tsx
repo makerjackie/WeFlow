@@ -31,6 +31,7 @@ const steps = [
   { id: 'cache', title: '缓存目录', desc: '设置本地缓存存储位置（可选）' },
   { id: 'key', title: '解密密钥', desc: '获取密钥与自动识别账号' },
   { id: 'image', title: '图片密钥', desc: '获取 XOR 与 AES 密钥' },
+  { id: 'ai', title: 'AI 模型', desc: '配置通用模型接口（可选）' },
   { id: 'security', title: '安全防护', desc: '保护你的数据' }
 ]
 type SetupStepId = typeof steps[number]['id']
@@ -121,6 +122,10 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   const [isFetchingImageKey, setIsFetchingImageKey] = useState(false)
   const [showDecryptKey, setShowDecryptKey] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
+  const [aiApiBaseUrl, setAiApiBaseUrl] = useState('https://api.deepseek.com')
+  const [aiApiKey, setAiApiKey] = useState('')
+  const [aiModel, setAiModel] = useState('deepseek-v4-flash')
+  const [showAiApiKey, setShowAiApiKey] = useState(false)
   const [dbKeyStatus, setDbKeyStatus] = useState('')
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [isManualStartPrompt, setIsManualStartPrompt] = useState(false)
@@ -143,6 +148,23 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   // 检查 Hello 可用性
   useEffect(() => {
     setHelloAvailable(isWindows)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void Promise.all([
+      configService.getAiModelApiBaseUrl(),
+      configService.getAiModelApiKey(),
+      configService.getAiModelApiModel()
+    ]).then(([baseUrl, apiKey, model]) => {
+      if (cancelled) return
+      setAiApiBaseUrl(baseUrl || 'https://api.deepseek.com')
+      setAiApiKey(apiKey || '')
+      setAiModel(model || 'deepseek-v4-flash')
+    }).catch(() => {})
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   async function sha256(message: string) {
@@ -317,7 +339,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   }, [showWxidSelect])
 
   const imageStepIndex = steps.findIndex(step => step.id === 'image')
-  const securityStepIndex = steps.findIndex(step => step.id === 'security')
+  const aiStepIndex = steps.findIndex(step => step.id === 'ai')
   const currentStep = steps[stepIndex] ?? steps[0]
   const imagePreCompletedAhead = isImageStepAutoCompleted && imageStepIndex >= 0 && stepIndex < imageStepIndex
   const rootClassName = `welcome-page${isClosing ? ' is-closing' : ''}${standalone ? ' is-standalone' : ''}`
@@ -675,6 +697,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     if (currentStep.id === 'cache') return true
     if (currentStep.id === 'key') return decryptKey.length === 64 && Boolean(wxid)
     if (currentStep.id === 'image') return true
+    if (currentStep.id === 'ai') return Boolean(aiApiBaseUrl.trim()) && Boolean(aiModel.trim())
     if (currentStep.id === 'security') {
       if (enableAuth) {
         return authPassword.length > 0 && authPassword === authConfirmPassword
@@ -708,8 +731,8 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       return
     }
     setError('')
-    if (currentStep.id === 'key' && isImageStepAutoCompleted && securityStepIndex >= 0) {
-      setStepIndex(securityStepIndex)
+    if (currentStep.id === 'key' && isImageStepAutoCompleted && aiStepIndex >= 0) {
+      setStepIndex(aiStepIndex)
       return
     }
     setStepIndex((prev) => Math.min(prev + 1, steps.length - 1))
@@ -765,6 +788,9 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       const parsedXorKey = imageXorKey ? parseInt(imageXorKey.replace(/^0x/i, ''), 16) : null
       await configService.setImageXorKey(typeof parsedXorKey === 'number' && !Number.isNaN(parsedXorKey) ? parsedXorKey : 0)
       await configService.setImageAesKey(imageAesKey || '')
+      await configService.setAiModelApiBaseUrl(aiApiBaseUrl.trim() || 'https://api.deepseek.com')
+      await configService.setAiModelApiKey(aiApiKey.trim())
+      await configService.setAiModelApiModel(aiModel.trim() || 'deepseek-v4-flash')
       await configService.setWxidConfig(wxid, {
         decryptKey,
         imageXorKey: typeof parsedXorKey === 'number' && !Number.isNaN(parsedXorKey) ? parsedXorKey : 0,
@@ -1144,6 +1170,51 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
                     {!helloAvailable && <div className="field-hint warning"> 当前设备不支持 Windows Hello 或未设置 PIN 码</div>}
                   </div>
                 )}
+              </div>
+            )}
+
+            {currentStep.id === 'ai' && (
+              <div className="form-group ai-onboarding-form">
+                <div className="ai-onboarding-note">
+                  <Sparkles size={18} />
+                  <div>
+                    <strong>用于 AI 见解与足迹总结</strong>
+                    <span>默认接入 DeepSeek V4 Flash。API Key 可稍后在设置中补充。</span>
+                  </div>
+                </div>
+
+                <label className="field-label">通用 API 地址</label>
+                <input
+                  type="text"
+                  className="field-input"
+                  value={aiApiBaseUrl}
+                  placeholder="https://api.deepseek.com"
+                  onChange={(event) => setAiApiBaseUrl(event.target.value)}
+                />
+
+                <label className="field-label mt-4">通用模型名称</label>
+                <input
+                  type="text"
+                  className="field-input"
+                  value={aiModel}
+                  placeholder="deepseek-v4-flash"
+                  onChange={(event) => setAiModel(event.target.value)}
+                />
+
+                <label className="field-label mt-4">通用 API Key（可选）</label>
+                <div className="field-with-toggle">
+                  <input
+                    type={showAiApiKey ? 'text' : 'password'}
+                    className="field-input"
+                    value={aiApiKey}
+                    placeholder="sk-..."
+                    onChange={(event) => setAiApiKey(event.target.value)}
+                  />
+                  <button type="button" className="toggle-btn" onClick={() => setShowAiApiKey((value) => !value)}>
+                    {showAiApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+                <div className="field-hint">Key 会通过系统安全存储加密；留空不会影响聊天查看与导出。</div>
               </div>
             )}
 

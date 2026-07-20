@@ -123,22 +123,22 @@ export function ExportDefaultsSettingsForm({
   const [exportExcelColumnsPlacement, setExportExcelColumnsPlacement] = useState<SelectDropdownPlacement | null>(null)
   const [exportFileNamingModePlacement, setExportFileNamingModePlacement] = useState<SelectDropdownPlacement | null>(null)
 
-  const [exportDefaultFormat, setExportDefaultFormat] = useState('excel')
-  const [exportDefaultAvatars, setExportDefaultAvatars] = useState(true)
+  const [exportDefaultFormat, setExportDefaultFormat] = useState('txt')
+  const [exportDefaultAvatars, setExportDefaultAvatars] = useState(false)
   const [exportDefaultDateRange, setExportDefaultDateRange] = useState<ExportDateRangeSelection>(() => createDefaultExportDateRangeSelection())
   const [exportDefaultFileNamingMode, setExportDefaultFileNamingMode] = useState<configService.ExportFileNamingMode>('classic')
   const [exportDefaultDisplayNamePreference, setExportDefaultDisplayNamePreference] = useState<configService.ExportDisplayNamePreference>('remark')
   const [exportDefaultMedia, setExportDefaultMedia] = useState<configService.ExportDefaultMediaConfig>({
-    images: true,
-    videos: true,
-    voices: true,
-    emojis: true,
-    files: true,
+    images: false,
+    videos: false,
+    voices: false,
+    emojis: false,
+    files: false,
     maxFileSizeMb: 200
   })
   const [exportDefaultVoiceAsText, setExportDefaultVoiceAsText] = useState(false)
   const [exportDefaultExcelCompactColumns, setExportDefaultExcelCompactColumns] = useState(true)
-  const [exportDefaultConcurrency, setExportDefaultConcurrency] = useState(2)
+  const [exportDefaultConcurrency, setExportDefaultConcurrency] = useState(4)
 
   useEffect(() => {
     let cancelled = false
@@ -167,22 +167,22 @@ export function ExportDefaultsSettingsForm({
 
       if (cancelled) return
 
-      setExportDefaultFormat(savedFormat || 'excel')
-      setExportDefaultAvatars(savedAvatars ?? true)
+      setExportDefaultFormat(savedFormat || 'txt')
+      setExportDefaultAvatars(savedAvatars ?? false)
       setExportDefaultDateRange(resolveExportDateRangeConfig(savedDateRange))
       setExportDefaultFileNamingMode(savedFileNamingMode ?? 'classic')
       setExportDefaultDisplayNamePreference(savedDisplayNamePreference ?? 'remark')
       setExportDefaultMedia(savedMedia ?? {
-        images: true,
-        videos: true,
-        voices: true,
-        emojis: true,
-        files: true,
+        images: false,
+        videos: false,
+        voices: false,
+        emojis: false,
+        files: false,
         maxFileSizeMb: 200
       })
       setExportDefaultVoiceAsText(savedVoiceAsText ?? false)
       setExportDefaultExcelCompactColumns(savedExcelCompactColumns ?? true)
-      setExportDefaultConcurrency(savedConcurrency ?? 2)
+      setExportDefaultConcurrency(savedConcurrency ?? 4)
     })()
 
     return () => {

@@ -2240,6 +2240,16 @@ function registerIpcHandlers() {
     return shell.openPath(path)
   })
 
+  ipcMain.handle('shell:showItemInFolder', async (_, path: string) => {
+    const targetPath = String(path || '').trim()
+    if (!targetPath) {
+      return { success: false, error: '文件路径为空' }
+    }
+    const { shell } = await import('electron')
+    shell.showItemInFolder(targetPath)
+    return { success: true }
+  })
+
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
     const { shell } = await import('electron')
     const safeUrl = normalizeAllowedExternalUrl(url)
@@ -2762,6 +2772,7 @@ function registerIpcHandlers() {
   ipcMain.handle('chat:enrichSessionsContactInfo', async (_, usernames: string[], options?: {
     skipDisplayName?: boolean
     onlyMissingAvatar?: boolean
+    skipAvatar?: boolean
   }) => {
     return chatService.enrichSessionsContactInfo(usernames, options)
   })
@@ -3653,6 +3664,29 @@ function registerIpcHandlers() {
     const cachePath = String(cfg.get('cachePath') || '').trim()
     const emojiCacheDir = cachePath ? join(cachePath, 'Emojis') : join(app.getPath('documents'), 'WeFlow', 'Emojis')
     const workerPath = join(__dirname, 'exportWorker.js')
+    const sessionSnapshots: Record<string, { messageCountHint?: number; lastTimestamp?: number }> = {}
+    try {
+      const selectedSessionIds = new Set(sessionIds.map((id) => String(id || '').trim()).filter(Boolean))
+      const sessionsResult = await chatService.getSessions()
+      if (sessionsResult?.success && Array.isArray(sessionsResult.sessions)) {
+        for (const sessionItem of sessionsResult.sessions) {
+          const sessionId = String(sessionItem?.username || '').trim()
+          if (!selectedSessionIds.has(sessionId)) continue
+          const messageCountHint = Number(sessionItem?.messageCountHint)
+          const lastTimestamp = Number(sessionItem?.lastTimestamp)
+          sessionSnapshots[sessionId] = {
+            messageCountHint: Number.isFinite(messageCountHint) && messageCountHint >= 0
+              ? Math.floor(messageCountHint)
+              : undefined,
+            lastTimestamp: Number.isFinite(lastTimestamp) && lastTimestamp > 0
+              ? Math.floor(lastTimestamp)
+              : undefined
+          }
+        }
+      }
+    } catch {
+      // 快照仅用于跳过未变化的重复导出；读取失败时仍走完整导出流程。
+    }
 
     const runWorker = async () => {
       return await new Promise<any>((resolve, reject) => {
@@ -3672,6 +3706,7 @@ function registerIpcHandlers() {
             userDataPath,
             cachePath,
             emojiCacheDir,
+            sessionSnapshots,
             logEnabled,
             isPackaged: app.isPackaged
           }

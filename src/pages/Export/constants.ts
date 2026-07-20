@@ -155,19 +155,16 @@ export const EXPORT_REENTER_CONTACTS_SOFT_REFRESH_MS = 5 * 60 * 1000
 // ─── Default export options ──────────────────────────────────
 
 export const createDefaultExportOptions = (): import('./types').ExportOptions => ({
-  format: 'json',
-  dateRange: {
-    start: new Date(new Date().setHours(0, 0, 0, 0)),
-    end: new Date()
-  },
-  useAllTime: false,
-  exportAvatars: true,
-  exportMedia: true,
-  exportImages: true,
-  exportVoices: true,
-  exportVideos: true,
-  exportEmojis: true,
-  exportFiles: true,
+  format: 'txt',
+  dateRange: null,
+  useAllTime: true,
+  exportAvatars: false,
+  exportMedia: false,
+  exportImages: false,
+  exportVoices: false,
+  exportVideos: false,
+  exportEmojis: false,
+  exportFiles: false,
   maxFileSizeMb: 200,
   exportVoiceAsText: false,
   exportPathStyle: 'auto',
@@ -175,7 +172,7 @@ export const createDefaultExportOptions = (): import('./types').ExportOptions =>
   excelCompactColumns: true,
   txtColumns: defaultTxtColumns,
   displayNamePreference: 'remark',
-  exportConcurrency: 2,
+  exportConcurrency: 4,
   fileNamingMode: 'classic'
 })
 

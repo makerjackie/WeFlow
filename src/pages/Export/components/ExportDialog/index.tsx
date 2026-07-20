@@ -1,7 +1,6 @@
 import React, { memo, useState, useEffect } from 'react'
 import {
   X,
-  FileText,
   Image as ImageIcon,
   Video,
   Mic,
@@ -11,7 +10,8 @@ import {
   Settings,
   HardDrive,
   ExternalLink,
-  FolderOpen
+  FolderOpen,
+  ChevronDown
 } from 'lucide-react'
 import { ExportDateRangeDialog } from '../../../../components/Export/ExportDateRangeDialog'
 import {
@@ -49,12 +49,16 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
   const [isDateRangeOpen, setIsDateRangeOpen] = useState(false)
   const [draftOptions, setDraftOptions] = useState<ExportOptions>(options)
   const [draftDateRangeConfig, setDraftDateRangeConfig] = useState<ExportDefaultDateRangeConfig | string | null>(rawDateRangeConfig)
+  const [showMediaOptions, setShowMediaOptions] = useState(false)
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false)
 
   useEffect(() => {
     if (!dialogState.open) return
     setDraftOptions(options)
     setDraftDateRangeConfig(rawDateRangeConfig)
     setIsDateRangeOpen(false)
+    setShowMediaOptions(false)
+    setShowAdvancedOptions(false)
   }, [dialogState.open, options, rawDateRangeConfig])
 
   const currentSelection = React.useMemo(() => {
@@ -78,6 +82,14 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
   const effectiveDisplayNamePreference: DisplayNamePreference = !hasGroupSession && draftOptions.displayNamePreference === 'group-nickname'
     ? 'remark'
     : draftOptions.displayNamePreference
+
+  const selectedMediaCount = [
+    draftOptions.exportImages,
+    draftOptions.exportVideos,
+    draftOptions.exportVoices,
+    draftOptions.exportEmojis,
+    draftOptions.exportFiles
+  ].filter(Boolean).length
 
   if (!dialogState.open) return null
 
@@ -151,6 +163,22 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
               </div>
 
               <div className="config-row">
+                <label className="row-label" htmlFor="export-format-select">导出格式</label>
+                <div className="compact-format-control">
+                  <select
+                    id="export-format-select"
+                    value={draftOptions.format}
+                    onChange={(event) => handleFormatSelect(event.target.value as TextExportFormat)}
+                  >
+                    {formatOptions.map((format) => (
+                      <option key={format.value} value={format.value}>{format.label}</option>
+                    ))}
+                  </select>
+                  <span>{formatOptions.find((format) => format.value === draftOptions.format)?.desc}</span>
+                </div>
+              </div>
+
+              <div className="config-row">
                 <span className="row-label">保存路径</span>
                 <div className="export-path-row">
                   <div className="path-display-group">
@@ -184,31 +212,20 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
             {!exportPath && <div className="error-text">请先选择一个保存路径</div>}
           </div>
 
-          {/* Format Selection */}
-          <div className="config-section">
-            <div className="section-title">
-              <FileText size={16} /> 导出格式
-            </div>
-            <div className="format-grid">
-              {formatOptions.map(fmt => (
-                <button
-                  key={fmt.value}
-                  className={`format-card ${draftOptions.format === fmt.value ? 'active' : ''}`}
-                  onClick={() => handleFormatSelect(fmt.value)}
-                >
-                  <div className="format-name">{fmt.label}</div>
-                  <div className="format-desc">{fmt.desc}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-
           {/* Media Configuration */}
-          <div className="config-section">
-            <div className="section-title">
-              <HardDrive size={16} /> 媒体与文件附件
-            </div>
-            <div className="media-options">
+          <div className="config-section compact-disclosure">
+            <button
+              type="button"
+              className="disclosure-header"
+              aria-expanded={showMediaOptions}
+              onClick={() => setShowMediaOptions((value) => !value)}
+            >
+              <span className="disclosure-title"><HardDrive size={16} /> 附件</span>
+              <span className="disclosure-summary">{selectedMediaCount > 0 ? `已选择 ${selectedMediaCount} 类` : '不导出（更快）'}</span>
+              <ChevronDown size={16} className={showMediaOptions ? 'expanded' : ''} />
+            </button>
+            {showMediaOptions && <div className="disclosure-body">
+              <div className="media-options">
               <label className="checkbox-label">
                 <input
                   type="checkbox"
@@ -253,30 +270,38 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
                 />
                 <Smile size={16} /> 导出表情包
               </label>
-            </div>
-
-            {(draftOptions.exportVideos || draftOptions.exportFiles) && (
-              <div className="file-size-limit">
-                <span>最大文件限制 (MB):</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={MAX_EXPORT_FILE_SIZE_MB_LIMIT}
-                  value={draftOptions.maxFileSizeMb}
-                  onChange={e => updateDraftOptions({
-                    maxFileSizeMb: Math.max(1, Math.min(MAX_EXPORT_FILE_SIZE_MB_LIMIT, Math.floor(Number(e.target.value) || 1)))
-                  })}
-                />
               </div>
-            )}
+
+              {(draftOptions.exportVideos || draftOptions.exportFiles) && (
+                <div className="file-size-limit">
+                  <span>最大文件限制 (MB):</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_EXPORT_FILE_SIZE_MB_LIMIT}
+                    value={draftOptions.maxFileSizeMb}
+                    onChange={e => updateDraftOptions({
+                      maxFileSizeMb: Math.max(1, Math.min(MAX_EXPORT_FILE_SIZE_MB_LIMIT, Math.floor(Number(e.target.value) || 1)))
+                    })}
+                  />
+                </div>
+              )}
+            </div>}
           </div>
 
           {/* Advanced Options */}
-          <div className="config-section">
-            <div className="section-title">
-              <Settings size={16} /> 高级选项
-            </div>
-            <div className="advanced-options">
+          <div className="config-section compact-disclosure">
+            <button
+              type="button"
+              className="disclosure-header"
+              aria-expanded={showAdvancedOptions}
+              onClick={() => setShowAdvancedOptions((value) => !value)}
+            >
+              <span className="disclosure-title"><Settings size={16} /> 高级选项</span>
+              <span className="disclosure-summary">命名、并发与覆盖方式</span>
+              <ChevronDown size={16} className={showAdvancedOptions ? 'expanded' : ''} />
+            </button>
+            {showAdvancedOptions && <div className="disclosure-body advanced-options">
               <label className="checkbox-label">
                 <input
                   type="checkbox"
@@ -364,7 +389,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
                   <option value={10}>10 (最快, 易卡顿)</option>
                 </select>
               </div>
-            </div>
+            </div>}
           </div>
         </div>
 

@@ -708,7 +708,7 @@ function MyFootprintPage() {
       <section className="footprint-header">
         <div className="footprint-title-wrap">
           <h1>我的微信足迹</h1>
-          <p>范围：{currentRange.label}</p>
+          <p>范围：{currentRange.label} · 仅扫描消息索引与文字，不读取图片、视频文件</p>
         </div>
 
         <div className="footprint-toolbar">

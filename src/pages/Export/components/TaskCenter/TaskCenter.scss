@@ -13,6 +13,17 @@
     justify-content: space-between;
     align-items: center;
 
+    .task-center-title-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+
+      > span {
+        color: var(--text-tertiary);
+        font-size: 11px;
+      }
+    }
+
     .title {
       font-size: 14px;
       font-weight: 600;
@@ -124,6 +135,25 @@
         display: flex;
         align-items: center;
         gap: 6px;
+
+        .result-action-btn {
+          height: 28px;
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          padding: 0 9px;
+          border: 1px solid color-mix(in srgb, var(--primary) 36%, var(--border-color));
+          border-radius: 6px;
+          background: color-mix(in srgb, var(--primary) 7%, var(--bg-surface, var(--bg-primary)));
+          color: var(--primary);
+          font-size: 11px;
+          cursor: pointer;
+
+          &:hover {
+            border-color: var(--primary);
+            background: color-mix(in srgb, var(--primary) 13%, var(--bg-surface, var(--bg-primary)));
+          }
+        }
 
         .action-btn {
           display: inline-flex;

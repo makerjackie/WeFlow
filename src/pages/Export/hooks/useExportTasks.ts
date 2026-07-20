@@ -138,6 +138,16 @@ export function useExportTasks(): ExportTasksResult {
 
         const frontendOptions = payload.options as any
         const electronOptions = { ...frontendOptions }
+        const hasMediaSelection = Boolean(
+          electronOptions.exportImages
+          || electronOptions.exportVideos
+          || electronOptions.exportVoices
+          || electronOptions.exportEmojis
+          || electronOptions.exportFiles
+        )
+        if (!hasMediaSelection && !electronOptions.contentType) {
+          electronOptions.contentType = 'text'
+        }
         if (frontendOptions?.useAllTime) {
           electronOptions.dateRange = null
         } else if (frontendOptions?.dateRange) {

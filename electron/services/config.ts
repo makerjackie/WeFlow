@@ -244,14 +244,14 @@ export class ConfigService {
       wordCloudExcludeWords: [],
       exportWriteLayout: 'A',
       exportAutomationTaskMap: {},
-      aiModelApiBaseUrl: '',
+      aiModelApiBaseUrl: 'https://api.deepseek.com',
       aiModelApiKey: '',
-      aiModelApiModel: 'gpt-4o-mini',
+      aiModelApiModel: 'deepseek-v4-flash',
       aiModelApiMaxTokens: 1024,
       aiInsightEnabled: false,
       aiInsightApiBaseUrl: '',
       aiInsightApiKey: '',
-      aiInsightApiModel: 'gpt-4o-mini',
+      aiInsightApiModel: 'deepseek-v4-flash',
       aiInsightSilenceDays: 3,
       aiInsightAllowContext: false,
       aiInsightAllowMomentsContext: false,
@@ -868,14 +868,17 @@ export class ConfigService {
     const legacyApiKey = String(this.get('aiInsightApiKey') || '').trim()
     const legacyModel = String(this.get('aiInsightApiModel') || '').trim()
 
-    if (!sharedBaseUrl && legacyBaseUrl) {
-      this.set('aiModelApiBaseUrl', legacyBaseUrl)
-    }
     if (!sharedApiKey && legacyApiKey) {
+      if (legacyBaseUrl) this.set('aiModelApiBaseUrl', legacyBaseUrl)
       this.set('aiModelApiKey', legacyApiKey)
-    }
-    if (!sharedModel && legacyModel) {
-      this.set('aiModelApiModel', legacyModel)
+      if (legacyModel) this.set('aiModelApiModel', legacyModel)
+    } else if (
+      !sharedApiKey
+      && (!sharedBaseUrl || sharedBaseUrl === 'https://api.openai.com/v1')
+      && (!sharedModel || sharedModel === 'gpt-4o-mini')
+    ) {
+      this.set('aiModelApiBaseUrl', 'https://api.deepseek.com')
+      this.set('aiModelApiModel', 'deepseek-v4-flash')
     }
 
     const groupSummaryFilterMode = String(this.store.get('aiGroupSummaryFilterMode' as any) || '').trim()
@@ -1132,4 +1135,3 @@ export class ConfigService {
     this.unlockPassword = null
   }
 }
-

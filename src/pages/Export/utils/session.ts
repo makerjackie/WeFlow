@@ -53,53 +53,11 @@ export const toSessionRowsWithContacts = (
   sessions: AppChatSession[],
   contactMap: Record<string, ContactInfo>
 ): SessionRow[] => {
-  const sessionMap = new Map<string, AppChatSession>()
-  for (const session of sessions || []) {
-    sessionMap.set(session.username, session)
-  }
-
-  const contacts = Object.values(contactMap)
-    .filter((contact) => (
-      contact.type === 'friend' ||
-      contact.type === 'group' ||
-      contact.type === 'official' ||
-      contact.type === 'former_friend'
-    ))
-
-  if (contacts.length > 0) {
-    return contacts
-      .map((contact) => {
-        const session = sessionMap.get(contact.username)
-        const latestTs = session?.sortTimestamp || session?.lastTimestamp || 0
-        return {
-          ...(session || {
-            username: contact.username,
-            type: 0,
-            unreadCount: 0,
-            summary: '',
-            sortTimestamp: latestTs,
-            lastTimestamp: latestTs,
-            lastMsgType: 0
-          }),
-          username: contact.username,
-          kind: toKindByContact(contact),
-          wechatId: contact.username,
-          displayName: displayNameOrFallback(contact.username, contact.displayName, session?.displayName),
-          avatarUrl: session?.avatarUrl || contact.avatarUrl,
-          remark: contact.remark,
-          nickname: contact.nickname,
-          hasSession: Boolean(session)
-        } as SessionRow
-      })
-      .sort((a, b) => {
-        const latestA = a.sortTimestamp || a.lastTimestamp || 0
-        const latestB = b.sortTimestamp || b.lastTimestamp || 0
-        if (latestA !== latestB) return latestB - latestA
-        return displayNameOrFallback(a.username, a.displayName).localeCompare(displayNameOrFallback(b.username, b.displayName), 'zh-Hans-CN')
-      })
-  }
-
-  return sessions
+  // Export is a chat-history operation, so the session database is the source
+  // of truth. Contacts only enrich rows with names and avatars. Building this
+  // list from the full address book included contacts with no message table,
+  // which made them selectable even though every export engine had to fail.
+  return (sessions || [])
     .map((session) => {
       const contact = contactMap[session.username]
       return {

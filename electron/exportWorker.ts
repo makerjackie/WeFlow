@@ -268,7 +268,7 @@ const shouldFallbackFromWeliveResult = (result: any): boolean => {
     failedSessionErrors.length > 0
   if (!hasReportedFailure) return false
   const text = collectWeliveErrorText(result)
-  return /3221225477|0x?c0000005|-1073741819|native jsonl export failed with status\s*-3|cursor state failed|QueryMessageBatch\s+no rows|WeLive 原始导出数据不完整|JSON 解析失败|Unterminated string in JSON|export timed out|without progress/i.test(text)
+  return /3221225477|0x?c0000005|-1073741819|native jsonl export failed with status\s*-3|cursor state failed|get_messages:\s*no message db|no message db for|QueryMessageBatch\s+no rows|WeLive 原始导出数据不完整|JSON 解析失败|Unterminated string in JSON|export timed out|without progress/i.test(text)
 }
 
 async function runWeliveEngine() {

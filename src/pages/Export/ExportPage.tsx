@@ -46,7 +46,6 @@ function ExportPage() {
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false)
   const [draftAutomationPayload, setDraftAutomationPayload] = useState<any>(null)
   const [pendingSingleExportRequest, setPendingSingleExportRequest] = useState<OpenSingleExportPayload | null>(null)
-  const [visibleSessionIds, setVisibleSessionIds] = useState<string[]>([])
 
   const { 
     isLoaded: isConfigLoaded,
@@ -72,11 +71,8 @@ function ExportPage() {
   const {
     metricsMap,
     fetchMessageCounts,
-    fetchMetrics,
-    loadingRefs,
     messageCountLoadingRefs,
     messageCountProgress,
-    detailProgress,
     error: metricsError
   } = useSessionMetrics()
 
@@ -120,26 +116,10 @@ function ExportPage() {
     }
   }, [sessions, fetchMessageCounts])
 
-  useEffect(() => {
-    if (visibleSessionIds.length > 0) {
-      void fetchMetrics(visibleSessionIds)
-    }
-  }, [fetchMetrics, visibleSessionIds])
-
-  const handleVisibleSessionIdsChange = useCallback((nextIds: string[]) => {
-    setVisibleSessionIds(current => {
-      if (current.length === nextIds.length && current.every((id, index) => id === nextIds[index])) return current
-      return nextIds
-    })
-  }, [])
-
   const handleRefreshStats = useCallback(() => {
-    if (sessions.length === 0 || messageCountProgress.active || detailProgress.active) return
-    void Promise.all([
-      fetchMessageCounts(sessions.map(session => session.username), { forceRefresh: true }),
-      fetchMetrics(visibleSessionIds, { forceRefresh: true })
-    ])
-  }, [detailProgress.active, fetchMessageCounts, fetchMetrics, messageCountProgress.active, sessions, visibleSessionIds])
+    if (sessions.length === 0 || messageCountProgress.active) return
+    void fetchMessageCounts(sessions.map(session => session.username), { forceRefresh: true })
+  }, [fetchMessageCounts, messageCountProgress.active, sessions])
 
   // ── 4. Manage Tasks ──
   const {
@@ -360,13 +340,10 @@ function ExportPage() {
             error={sessionsError}
             metricsError={metricsError?.message || null}
             metricsMap={metricsMap}
-            loadingRefs={loadingRefs}
             messageCountLoadingRefs={messageCountLoadingRefs}
             messageCountProgress={messageCountProgress}
-            detailProgress={detailProgress}
-            onVisibleSessionIdsChange={handleVisibleSessionIdsChange}
             onRefreshStats={handleRefreshStats}
-            isRefreshingStats={messageCountProgress.active || detailProgress.active}
+            isRefreshingStats={messageCountProgress.active}
             onSingleExport={handleSingleExport}
             onBatchExport={handleExportSelected}
             onAutomationExport={handleAutomationExportFromSelection}

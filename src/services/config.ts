@@ -40,6 +40,7 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns',
   EXPORT_DEFAULT_CONCURRENCY: 'exportDefaultConcurrency',
   EXPORT_DEFAULT_DISPLAY_NAME_PREFERENCE: 'exportDefaultDisplayNamePreference',
+  EXPORT_TEXT_FIRST_DEFAULTS_VERSION: 'exportTextFirstDefaultsVersion',
   EXPORT_WRITE_LAYOUT: 'exportWriteLayout',
   EXPORT_SESSION_NAME_PREFIX_ENABLED: 'exportSessionNamePrefixEnabled',
   EXPORT_LAST_SESSION_RUN_MAP: 'exportLastSessionRunMap',
@@ -171,11 +172,11 @@ export type QuoteLayout = 'quote-top' | 'quote-bottom'
 export type UpdateChannel = 'stable' | 'preview' | 'dev'
 
 const DEFAULT_EXPORT_MEDIA_CONFIG: ExportDefaultMediaConfig = {
-  images: true,
-  videos: true,
-  voices: true,
-  emojis: true,
-  files: true,
+  images: false,
+  videos: false,
+  voices: false,
+  emojis: false,
+  files: false,
   maxFileSizeMb: 200
 }
 
@@ -652,6 +653,15 @@ export async function getExportDefaultDisplayNamePreference(): Promise<ExportDis
 // 设置导出默认命名方式
 export async function setExportDefaultDisplayNamePreference(preference: ExportDisplayNamePreference): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_DISPLAY_NAME_PREFERENCE, preference)
+}
+
+export async function getExportTextFirstDefaultsVersion(): Promise<number> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_TEXT_FIRST_DEFAULTS_VERSION)
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+}
+
+export async function setExportTextFirstDefaultsVersion(version: number): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_TEXT_FIRST_DEFAULTS_VERSION, Math.max(0, Math.floor(version)))
 }
 
 export type ExportWriteLayout = 'A' | 'B' | 'C'
@@ -1936,7 +1946,7 @@ export async function getAiModelApiBaseUrl(): Promise<string> {
   const value = await config.get(CONFIG_KEYS.AI_MODEL_API_BASE_URL)
   if (typeof value === 'string' && value.trim()) return value
   const legacy = await config.get(CONFIG_KEYS.AI_INSIGHT_API_BASE_URL)
-  return typeof legacy === 'string' ? legacy : ''
+  return typeof legacy === 'string' && legacy.trim() ? legacy.trim() : 'https://api.deepseek.com'
 }
 
 export async function setAiModelApiBaseUrl(url: string): Promise<void> {
@@ -1958,7 +1968,7 @@ export async function getAiModelApiModel(): Promise<string> {
   const value = await config.get(CONFIG_KEYS.AI_MODEL_API_MODEL)
   if (typeof value === 'string' && value.trim()) return value.trim()
   const legacy = await config.get(CONFIG_KEYS.AI_INSIGHT_API_MODEL)
-  return typeof legacy === 'string' && legacy.trim() ? legacy.trim() : 'gpt-4o-mini'
+  return typeof legacy === 'string' && legacy.trim() ? legacy.trim() : 'deepseek-v4-flash'
 }
 
 export async function setAiModelApiModel(model: string): Promise<void> {
@@ -2360,4 +2370,3 @@ export async function setAutoDownloadWhitelist(list: string[]): Promise<void> {
   const normalized = Array.from(new Set((list || []).map(item => String(item || '').trim()).filter(Boolean)))
   await config.set(CONFIG_KEYS.AUTO_DOWNLOAD_WHITELIST, normalized)
 }
-

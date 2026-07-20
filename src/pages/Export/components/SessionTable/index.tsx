@@ -1,5 +1,5 @@
-import React, { memo, useRef, useCallback, useEffect, useState } from 'react'
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import React, { memo, useCallback, useEffect, useState } from 'react'
+import { Virtuoso } from 'react-virtuoso'
 import { Search, X, CheckSquare, Square, RefreshCw } from 'lucide-react'
 import type { SessionRow, ConversationTab, ContactsSortConfig } from '../../types'
 import type { SessionContentMetric, SessionMetricsProgress } from '../../hooks/useSessionMetrics'
@@ -26,11 +26,8 @@ interface SessionTableProps {
   error?: string | null
   metricsError?: string | null
   metricsMap?: Record<string, SessionContentMetric>
-  loadingRefs?: Set<string>
   messageCountLoadingRefs?: Set<string>
   messageCountProgress?: SessionMetricsProgress
-  detailProgress?: SessionMetricsProgress
-  onVisibleSessionIdsChange?: (sessionIds: string[]) => void
   onRefreshStats?: () => void
   isRefreshingStats?: boolean
 }
@@ -52,18 +49,14 @@ const SessionTable: React.FC<SessionTableProps> = ({
   error,
   metricsError,
   metricsMap,
-  loadingRefs,
   messageCountLoadingRefs,
   messageCountProgress = { active: false, completed: 0, total: 0 },
-  detailProgress = { active: false, completed: 0, total: 0 },
-  onVisibleSessionIdsChange,
   onRefreshStats,
   isRefreshingStats = false
 }) => {
-  const virtuosoRef = useRef<VirtuosoHandle>(null)
   const [isStatsNoticeMounted, setIsStatsNoticeMounted] = useState(false)
   const [isStatsNoticeLeaving, setIsStatsNoticeLeaving] = useState(false)
-  const isMetricsScanning = messageCountProgress.active || detailProgress.active
+  const isMetricsScanning = messageCountProgress.active
 
   useEffect(() => {
     if (isMetricsScanning) {
@@ -113,13 +106,6 @@ const SessionTable: React.FC<SessionTableProps> = ({
     }
     onSelectionChange(next)
   }, [selectedSessionIds, onSelectionChange])
-
-  const handleVisibleRangeChange = useCallback((range: { startIndex: number; endIndex: number }) => {
-    if (!onVisibleSessionIdsChange || sessions.length === 0) return
-    const start = Math.max(0, range.startIndex - 6)
-    const end = Math.min(sessions.length, range.endIndex + 13)
-    onVisibleSessionIdsChange(sessions.slice(start, end).map(session => session.username))
-  }, [onVisibleSessionIdsChange, sessions])
 
   // Tabs layout
   const tabs: ConversationTab[] = ['private', 'group', 'official', 'former_friend']
@@ -209,11 +195,6 @@ const SessionTable: React.FC<SessionTableProps> = ({
             <span className="sort-icon">{sortConfig.order === 'desc' ? '↓' : '↑'}</span>
           )}
         </div>
-        <div className="col-stat">表情包</div>
-        <div className="col-stat">语音</div>
-        <div className="col-stat">图片</div>
-        <div className="col-stat">视频</div>
-        <div className="col-stat">文件</div>
         <div className="col-action">操作</div>
       </div>
 
@@ -228,7 +209,7 @@ const SessionTable: React.FC<SessionTableProps> = ({
           // 初始加载骨架屏，风格与「我的足迹」保持一致
           <div className="st-skeleton-body" aria-busy="true" aria-live="polite">
             <div className="st-skeleton-header">
-              {Array.from({ length: 10 }).map((_, i) => (
+              {Array.from({ length: 5 }).map((_, i) => (
                 <div key={i} className="st-skeleton-cell st-skeleton-shimmer" />
               ))}
             </div>
@@ -243,7 +224,7 @@ const SessionTable: React.FC<SessionTableProps> = ({
                       <div className="st-skeleton-line short st-skeleton-shimmer" />
                     </div>
                   </div>
-                  {Array.from({ length: 7 }).map((_, i) => (
+                  {Array.from({ length: 3 }).map((_, i) => (
                     <div key={i} className="st-skeleton-stat st-skeleton-shimmer" />
                   ))}
                 </div>
@@ -256,14 +237,11 @@ const SessionTable: React.FC<SessionTableProps> = ({
           </div>
         ) : (
           <Virtuoso
-            ref={virtuosoRef}
             data={sessions}
-            rangeChanged={handleVisibleRangeChange}
             itemContent={(index, session) => {
               if (!session) return null
 
               const metrics = metricsMap?.[session.username]
-              const isMetricsLoading = loadingRefs?.has(session.username) === true
               const isMessageCountLoading = messageCountLoadingRefs?.has(session.username) === true
               const hasExactTotal = metrics?.totalMessages !== undefined
               const hintedTotal = Number(session.messageCountHint)
@@ -309,41 +287,6 @@ const SessionTable: React.FC<SessionTableProps> = ({
                   <div className="col-time">
                     {session.lastTimestamp ? formatLatestMessageTimeFromSeconds(session.lastTimestamp).text : '-'}
                   </div>
-                  <div className="col-stat">
-                    {isMetricsLoading ? (
-                      <span className="st-stat-shimmer" />
-                    ) : (
-                      <span className="st-stat-fade-in">{metrics?.emojiMessages ?? '-'}</span>
-                    )}
-                  </div>
-                  <div className="col-stat">
-                    {isMetricsLoading ? (
-                      <span className="st-stat-shimmer" />
-                    ) : (
-                      <span className="st-stat-fade-in">{metrics?.voiceMessages ?? '-'}</span>
-                    )}
-                  </div>
-                  <div className="col-stat">
-                    {isMetricsLoading ? (
-                      <span className="st-stat-shimmer" />
-                    ) : (
-                      <span className="st-stat-fade-in">{metrics?.imageMessages ?? '-'}</span>
-                    )}
-                  </div>
-                  <div className="col-stat">
-                    {isMetricsLoading ? (
-                      <span className="st-stat-shimmer" />
-                    ) : (
-                      <span className="st-stat-fade-in">{metrics?.videoMessages ?? '-'}</span>
-                    )}
-                  </div>
-                  <div className="col-stat">
-                    {isMetricsLoading ? (
-                      <span className="st-stat-shimmer" />
-                    ) : (
-                      <span className="st-stat-fade-in">{metrics?.fileMessages ?? '-'}</span>
-                    )}
-                  </div>
                   <div className="col-action">
                     <button
                       className="st-action-btn"
@@ -369,18 +312,13 @@ const SessionTable: React.FC<SessionTableProps> = ({
             <span className="st-metrics-status-dot" />
             <div className="st-metrics-status-content">
               <div className="st-metrics-status-line">
-                <span>{messageCountProgress.active ? '正在读取总消息数' : '正在补充当前可见会话的媒体统计'}</span>
+                <span>正在读取总消息数</span>
                 <span className="st-metrics-status-count">
-                  {messageCountProgress.active
-                    ? `共 ${messageCountProgress.total.toLocaleString()} 项`
-                    : `${Math.min(detailProgress.completed, detailProgress.total).toLocaleString()} / ${detailProgress.total.toLocaleString()}`}
+                  {`共 ${messageCountProgress.total.toLocaleString()} 项`}
                 </span>
               </div>
-              <div className={`st-metrics-progress-track ${messageCountProgress.active ? 'indeterminate' : ''}`}>
+              <div className="st-metrics-progress-track indeterminate">
                 <span
-                  style={messageCountProgress.active
-                    ? undefined
-                    : { width: `${detailProgress.total > 0 ? Math.min(100, Math.round(detailProgress.completed / detailProgress.total * 100)) : 0}%` }}
                 />
               </div>
             </div>

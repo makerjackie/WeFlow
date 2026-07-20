@@ -230,7 +230,7 @@ export const createExportDateRangeSelectionFromPreset = (
 }
 
 export const createDefaultExportDateRangeSelection = (): ExportDateRangeSelection => (
-  createExportDateRangeSelectionFromPreset('today')
+  createExportDateRangeSelectionFromPreset('all')
 )
 
 const parseStoredDate = (value: unknown): Date | null => {

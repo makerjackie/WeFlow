@@ -20,6 +20,7 @@ interface ExportWorkerConfig {
   userDataPath?: string
   cachePath?: string
   emojiCacheDir?: string
+  sessionSnapshots?: Record<string, { messageCountHint?: number; lastTimestamp?: number }>
   logEnabled?: boolean
   isPackaged?: boolean
   welivePath?: string
@@ -372,15 +373,77 @@ async function runWeliveEngine() {
   const rawSessionOutputPaths: Record<string, string> = {}
   const failedSessionIds: string[] = []
   const failedSessionErrors: Record<string, string> = {}
-
-  for (let index = 0; index < sessionIds.length; index++) {
-    const sessionId = sessionIds[index]
-    if (knownSessionIds && knownSessionIds.size > 0 && !knownSessionIds.has(sessionId)) {
-      failedSessionIds.push(sessionId)
-      failedSessionErrors[sessionId] = '该会话没有可导出的聊天记录'
-      continue
+  const rawSkipSessionIds = new Set<string>()
+  const canSkipUnchangedRawExport = (
+    !exportMediaEnabled
+    && exportService.context.isUnboundedDateRange(effectiveOptions.dateRange)
+    && !String(effectiveOptions.senderUsername || '').trim()
+    && normalizeExportConflictStrategy(effectiveOptions.exportConflictStrategy) === 'incremental'
+  )
+  if (canSkipUnchangedRawExport) {
+    const { exportRecordService } = await import('./services/exportRecordService')
+    const snapshotMap = new Map<string, any>()
+    for (const [sessionId, snapshot] of Object.entries(config.sessionSnapshots || {})) {
+      if (sessionId) snapshotMap.set(sessionId, snapshot)
     }
-    const result = await runWeliveExport({
+    if (knownSessionsResult?.success && Array.isArray(knownSessionsResult.sessions)) {
+      for (const item of knownSessionsResult.sessions) {
+        const sessionId = String(item?.username || '').trim()
+        if (!sessionId) continue
+        const previous = snapshotMap.get(sessionId) || {}
+        snapshotMap.set(sessionId, {
+          ...item,
+          messageCountHint: Number.isFinite(Number(item?.messageCountHint))
+            ? Number(item.messageCountHint)
+            : previous.messageCountHint,
+          lastTimestamp: Number.isFinite(Number(item?.lastTimestamp)) && Number(item.lastTimestamp) > 0
+            ? Number(item.lastTimestamp)
+            : previous.lastTimestamp
+        })
+      }
+    }
+    for (const sessionId of sessionIds) {
+      const snapshot = snapshotMap.get(sessionId)
+      const messageCount = Number(snapshot?.messageCountHint)
+      const latestTimestamp = Number(snapshot?.lastTimestamp)
+      const record = exportRecordService.getLatestRecord(sessionId, String(effectiveOptions.format || 'txt'))
+      if (
+        Number.isFinite(messageCount)
+        && messageCount >= 0
+        && Number.isFinite(latestTimestamp)
+        && latestTimestamp > 0
+        && record?.messageCount === Math.floor(messageCount)
+        && Number(record.sourceLatestMessageTimestamp || 0) >= Math.floor(latestTimestamp)
+        && fs.existsSync(finalOutputPaths[sessionId])
+      ) {
+        rawSkipSessionIds.add(sessionId)
+      }
+    }
+  }
+
+  const rawQueue = sessionIds
+    .filter((sessionId) => !rawSkipSessionIds.has(sessionId))
+    .map((sessionId, index) => ({ sessionId, index }))
+  const requestedRawConcurrency = Math.max(1, Math.floor(Number(effectiveOptions.exportConcurrency || 4)))
+  const rawConcurrency = Math.min(
+    rawQueue.length,
+    exportMediaEnabled ? 2 : 4,
+    requestedRawConcurrency
+  )
+  let rawCompletedCount = rawSkipSessionIds.size
+
+  const rawWorkers = Array.from({ length: rawConcurrency }, async () => {
+    while (rawQueue.length > 0) {
+      const item = rawQueue.shift()
+      if (!item) break
+      const { sessionId } = item
+      if (knownSessionIds && knownSessionIds.size > 0 && !knownSessionIds.has(sessionId)) {
+        failedSessionIds.push(sessionId)
+        failedSessionErrors[sessionId] = '该会话没有可导出的聊天记录'
+        rawCompletedCount += 1
+        continue
+      }
+      const result = await runWeliveExport({
       resourcesPath: String(config.resourcesPath || ''),
       appPath: config.resourcesPath ? path.dirname(config.resourcesPath) : __dirname,
       welivePath: config.welivePath,
@@ -419,21 +482,50 @@ async function runWeliveEngine() {
           ? {
               ...(event as any),
               total: sessionIds.length,
-              current: backendPhase === 'complete' ? index + 1 : index,
+              current: backendPhase === 'complete' ? Math.min(sessionIds.length, rawCompletedCount + 1) : rawCompletedCount,
               session_id: String((event as any).session_id || sessionId)
             }
           : event
         const progress = mapWeliveEventToProgress(normalizedEvent as WeliveExportEvent)
         if (progress) queueProgress(progress)
       }
-    })
+      })
 
-    if (!result.success) {
-      failedSessionIds.push(sessionId)
-      failedSessionErrors[sessionId] = String(result.failedSessionErrors?.[sessionId] || result.error || 'WeLive export failed')
-      continue
+      rawCompletedCount += 1
+      if (!result.success) {
+        failedSessionIds.push(sessionId)
+        failedSessionErrors[sessionId] = String(result.failedSessionErrors?.[sessionId] || result.error || 'WeLive export failed')
+        continue
+      }
+      rawSessionOutputPaths[sessionId] = String(result.rawSessionOutputPaths?.[sessionId] || result.sessionOutputPaths?.[sessionId] || '')
     }
-    rawSessionOutputPaths[sessionId] = String(result.rawSessionOutputPaths?.[sessionId] || result.sessionOutputPaths?.[sessionId] || '')
+  })
+  await Promise.all(rawWorkers)
+
+  if (rawSkipSessionIds.size === sessionIds.length) {
+    const exportedMessages = sessionIds.reduce((sum, sessionId) => {
+      return sum + Math.max(0, Math.floor(Number(config.sessionSnapshots?.[sessionId]?.messageCountHint || 0)))
+    }, 0)
+    queueProgress({
+      current: sessionIds.length,
+      total: sessionIds.length,
+      currentSession: '',
+      currentSessionId: '',
+      phase: 'complete',
+      phaseLabel: '聊天记录无变化，已复用现有文件',
+      exportedMessages,
+      estimatedTotalMessages: exportedMessages
+    })
+    fs.rmSync(rawRoot, { recursive: true, force: true })
+    return {
+      success: true,
+      successCount: sessionIds.length,
+      failCount: 0,
+      successSessionIds: [...sessionIds],
+      failedSessionIds: [],
+      failedSessionErrors: {},
+      sessionOutputPaths: finalOutputPaths
+    }
   }
 
   if (failedSessionIds.length > 0) {
@@ -490,13 +582,29 @@ async function runWeliveEngine() {
       return await exportService.orchestrator.exportSessionToChatLab(sessionId, outputPath, options, queueProgress, taskControl)
     }
 
-    return await exportService.exportSessions(
-      sessionIds,
+    const pendingSessionIds = sessionIds.filter((sessionId) => !rawSkipSessionIds.has(sessionId))
+    const result = await exportService.exportSessions(
+      pendingSessionIds,
       outputDir,
       config.options || { format: 'json' },
       queueProgress,
       taskControl
     )
+    if (rawSkipSessionIds.size === 0) return result
+    const skippedSessionIds = Array.from(rawSkipSessionIds)
+    return {
+      ...result,
+      success: result.success !== false,
+      successCount: Math.max(0, Number(result.successCount || 0)) + skippedSessionIds.length,
+      successSessionIds: Array.from(new Set([
+        ...skippedSessionIds,
+        ...(Array.isArray(result.successSessionIds) ? result.successSessionIds : [])
+      ])),
+      sessionOutputPaths: {
+        ...Object.fromEntries(skippedSessionIds.map((sessionId) => [sessionId, finalOutputPaths[sessionId]])),
+        ...(result.sessionOutputPaths || {})
+      }
+    }
   } finally {
     exportService.clearWeliveRawExportPaths()
     fs.rmSync(rawRoot, { recursive: true, force: true })

@@ -1,5 +1,5 @@
 .session-table-container {
-  --session-table-min-width: 980px;
+  --session-table-min-width: 720px;
 
   display: flex;
   flex-direction: column;
@@ -215,7 +215,7 @@
   // ── Grid Layout Definition ───────────────────────────────────────────
   .st-header-row, .st-row {
     display: grid;
-    grid-template-columns: 48px minmax(200px, 1fr) 80px 120px 60px 60px 60px 60px 60px 80px;
+    grid-template-columns: 48px minmax(240px, 1fr) 110px 150px 80px;
     align-items: center;
     gap: 8px;
     padding: 0 24px;

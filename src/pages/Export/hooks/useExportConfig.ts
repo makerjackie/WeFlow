@@ -64,7 +64,8 @@ export function useExportConfig(): ExportConfigResult {
           txtCols,
           concurrency,
           fileNamingMode,
-          displayNamePreference
+          displayNamePreference,
+          textFirstDefaultsVersion
         ] = await Promise.all([
           configService.getExportPath(),
           configService.getExportWriteLayout(),
@@ -78,7 +79,8 @@ export function useExportConfig(): ExportConfigResult {
           configService.getExportDefaultTxtColumns(),
           configService.getExportDefaultConcurrency(),
           configService.getExportDefaultFileNamingMode(),
-          configService.getExportDefaultDisplayNamePreference()
+          configService.getExportDefaultDisplayNamePreference(),
+          configService.getExportTextFirstDefaultsVersion()
         ])
 
         if (!isMounted) return
@@ -98,6 +100,34 @@ export function useExportConfig(): ExportConfigResult {
         
         // Build ExportOptions from multiple configs
         const newOptions = createDefaultExportOptions()
+
+        if (textFirstDefaultsVersion < 1) {
+          const allTimeConfig: ExportDefaultDateRangeConfig = {
+            version: 1,
+            preset: 'all',
+            useAllTime: true
+          }
+          await Promise.all([
+            configService.setExportDefaultFormat('txt'),
+            configService.setExportDefaultAvatars(false),
+            configService.setExportDefaultMedia({
+              images: false,
+              videos: false,
+              voices: false,
+              emojis: false,
+              files: false,
+              maxFileSizeMb: newOptions.maxFileSizeMb
+            }),
+            configService.setExportDefaultVoiceAsText(false),
+            configService.setExportDefaultDateRange(allTimeConfig),
+            configService.setExportDefaultConcurrency(4),
+            configService.setExportTextFirstDefaultsVersion(1)
+          ])
+          if (!isMounted) return
+          setRawDateRangeConfigState(allTimeConfig)
+          setOptions(newOptions)
+          return
+        }
         
         if (format) newOptions.format = format as TextExportFormat
         if (typeof avatars === 'boolean') newOptions.exportAvatars = avatars

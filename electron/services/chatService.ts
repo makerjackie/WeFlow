@@ -478,7 +478,7 @@ class ChatService {
   private readonly sessionsMemoryCacheTtlMs = 30 * 1000
   private myFootprintStatsCache = new Map<string, { updatedAt: number; data: MyFootprintData }>()
   private myFootprintStatsInFlight = new Map<string, Promise<{ success: boolean; data?: MyFootprintData; error?: string }>>()
-  private readonly myFootprintStatsCacheTtlMs = 3 * 60 * 1000
+  private readonly myFootprintStatsCacheTtlMs = 10 * 60 * 1000
   private syntheticUnreadRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private syntheticUnreadRefreshInFlight: Promise<void> | null = null
   private syntheticUnreadRefreshGeneration = 0
@@ -1627,7 +1627,7 @@ class ChatService {
    */
   async enrichSessionsContactInfo(
     usernames: string[],
-    options?: { skipDisplayName?: boolean; onlyMissingAvatar?: boolean }
+    options?: { skipDisplayName?: boolean; onlyMissingAvatar?: boolean; skipAvatar?: boolean }
   ): Promise<{
     success: boolean
     contacts?: Record<string, { displayName?: string; avatarUrl?: string }>
@@ -1646,6 +1646,7 @@ class ChatService {
       }
       const skipDisplayName = options?.skipDisplayName === true
       const onlyMissingAvatar = options?.onlyMissingAvatar === true
+      const skipAvatar = options?.skipAvatar === true
 
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) {
@@ -1661,6 +1662,12 @@ class ChatService {
       for (const username of normalizedUsernames) {
         const cached = this.avatarCache.get(username)
         const cachedAvatarUrl = this.shouldPersistAvatarUrl(cached?.avatarUrl) ? cached?.avatarUrl : undefined
+        if (skipAvatar && cached && now - cached.updatedAt < this.avatarCacheTtlMs) {
+          result[username] = {
+            displayName: skipDisplayName ? undefined : cached.displayName
+          }
+          continue
+        }
         if (onlyMissingAvatar && cachedAvatarUrl) {
           result[username] = {
             displayName: skipDisplayName ? undefined : cached?.displayName,
@@ -1685,7 +1692,9 @@ class ChatService {
         const displayNames = skipDisplayName
           ? null
           : await wcdbService.getDisplayNames(missing)
-        const avatarUrls = await wcdbService.getAvatarUrls(missing)
+        const avatarUrls = skipAvatar
+          ? { success: true, map: {} as Record<string, string> }
+          : await wcdbService.getAvatarUrls(missing)
 
         // 收集没有头像 URL 的用户名
         const missingAvatars: string[] = []
@@ -1698,7 +1707,7 @@ class ChatService {
           let avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
 
           // 如果没有头像 URL，记录下来稍后从 head_image.db 获取
-          if (!avatarUrl) {
+          if (!skipAvatar && !avatarUrl) {
             missingAvatars.push(username)
           }
 
@@ -1713,7 +1722,7 @@ class ChatService {
           }
           result[username] = {
             displayName: skipDisplayName ? undefined : (displayName || previous?.displayName),
-            avatarUrl
+            avatarUrl: skipAvatar ? undefined : avatarUrl
           }
           // 更新缓存并记录持久化
           this.avatarCache.set(username, cacheEntry)
@@ -1721,7 +1730,7 @@ class ChatService {
         }
 
         // 从 head_image.db 获取缺失的头像
-        if (missingAvatars.length > 0) {
+        if (!skipAvatar && missingAvatars.length > 0) {
           const headImageAvatars = await this.getAvatarsFromHeadImageDb(missingAvatars)
           for (const username of missingAvatars) {
             const avatarUrl = headImageAvatars[username]
@@ -4777,14 +4786,8 @@ class ChatService {
       this.sessionDetailFastCache.clear()
       this.sessionDetailExtraCache.clear()
     }
-    if (
-      invalidatesMessageCounts ||
-      normalizedType.includes('group') ||
-      normalizedType.includes('member') ||
-      normalizedType.includes('contact')
-    ) {
-      this.myFootprintStatsCache.clear()
-    }
+    // 足迹统计代价较高，普通消息/联系人变更不立即清空结果；保留短时缓存，
+    // 用户可通过页面“刷新”显式获取最新数据。账号或数据库范围变化仍会清空。
     const maybeJson = String(json || '').trim()
     let ids = new Set<string>()
     if (maybeJson) {
@@ -10491,7 +10494,10 @@ class ChatService {
             groupSessionIds.push(sessionId)
           } else {
             if (!this.shouldKeepSession(sessionId, sessionLocalType)) continue
-            if (begin > 0 && sessionLastTs > 0 && sessionLastTs < begin) continue
+            // 有明确时间范围时只扫描 session.db 能确认在范围内活跃的会话。
+            // lastTimestamp 缺失的历史/残留联系人数量可能上千，逐个打开消息游标
+            // 不但极慢，也不会为“今天/本周”提供可靠结果。
+            if (begin > 0 && (sessionLastTs <= 0 || sessionLastTs < begin)) continue
             privateSessionIds.push(sessionId)
           }
         }
@@ -10576,58 +10582,28 @@ class ChatService {
         if (!Array.isArray(targetGroupSessionIds) || targetGroupSessionIds.length === 0) {
           return { raw: null, chunks: 0 }
         }
-        const singleGroupThresholdRaw = Number(process.env.WEFLOW_MY_FOOTPRINT_SINGLE_GROUP_THRESHOLD || 40)
-        const singleGroupThreshold = Number.isFinite(singleGroupThresholdRaw) && singleGroupThresholdRaw >= 1
-          ? Math.floor(singleGroupThresholdRaw)
-          : 40
-
         let aggregated: MyFootprintData | null = null
-        let chunks = 0
-        if (targetGroupSessionIds.length <= singleGroupThreshold) {
-          chunks = targetGroupSessionIds.length
-          for (let index = 0; index < targetGroupSessionIds.length; index += 1) {
-            const sessionId = targetGroupSessionIds[index]
-            const chunkRaw = await runNativePass({
-              label: `group-single:${sessionId}`,
-              passPrivateSessionIds: [],
-              passGroupSessionIds: [sessionId],
-              candidateLimit: candidateLimitUsed,
-              passPrivateLimit: 0
-            })
-            aggregated = aggregated
-              ? this.mergeMyFootprintMentionResult(aggregated, chunkRaw)
-              : chunkRaw
-            report({
-              stage: 'groups',
-              progress: 42 + Math.floor((index + 1) / Math.max(1, targetGroupSessionIds.length) * 36),
-              message: `正在扫描群聊 ${index + 1} / ${targetGroupSessionIds.length}`,
-              current: index + 1,
-              total: targetGroupSessionIds.length
-            })
-          }
-        } else {
-          const groupChunks = splitGroupSessionsForNative(targetGroupSessionIds)
-          chunks = groupChunks.length
-          for (let index = 0; index < groupChunks.length; index += 1) {
-            const chunk = groupChunks[index]
-            const chunkRaw = await runNativePass({
-              label: `group-chunk:${chunk[0] || ''}..(${chunk.length})`,
-              passPrivateSessionIds: [],
-              passGroupSessionIds: chunk,
-              candidateLimit: candidateLimitUsed,
-              passPrivateLimit: 0
-            })
-            aggregated = aggregated
-              ? this.mergeMyFootprintMentionResult(aggregated, chunkRaw)
-              : chunkRaw
-            report({
-              stage: 'groups',
-              progress: 42 + Math.floor((index + 1) / Math.max(1, groupChunks.length) * 36),
-              message: `正在扫描群聊批次 ${index + 1} / ${groupChunks.length}`,
-              current: index + 1,
-              total: groupChunks.length
-            })
-          }
+        const groupChunks = splitGroupSessionsForNative(targetGroupSessionIds)
+        const chunks = groupChunks.length
+        for (let index = 0; index < groupChunks.length; index += 1) {
+          const chunk = groupChunks[index]
+          const chunkRaw = await runNativePass({
+            label: `group-chunk:${chunk[0] || ''}..(${chunk.length})`,
+            passPrivateSessionIds: [],
+            passGroupSessionIds: chunk,
+            candidateLimit: candidateLimitUsed,
+            passPrivateLimit: 0
+          })
+          aggregated = aggregated
+            ? this.mergeMyFootprintMentionResult(aggregated, chunkRaw)
+            : chunkRaw
+          report({
+            stage: 'groups',
+            progress: 42 + Math.floor((index + 1) / Math.max(1, groupChunks.length) * 36),
+            message: `正在扫描群聊批次 ${index + 1} / ${groupChunks.length}`,
+            current: index + 1,
+            total: groupChunks.length
+          })
         }
         return { raw: aggregated, chunks }
       }
@@ -10734,7 +10710,37 @@ class ChatService {
 
       data = this.filterMyFootprintMentionsBySource(nativeRaw, myWxid, mentionLimit)
 
-      if (data.private_sessions.length > 0) {
+      const nativeReturnedEmpty = (
+        data.private_sessions.length === 0
+        && data.mentions.length === 0
+        && (privateSessionIds.length > 0 || groupSessionIds.length > 0)
+      )
+      if (nativeReturnedEmpty) {
+        report({ stage: 'fallback', progress: 80, message: '正在使用兼容模式读取足迹' })
+        const fallbackResult = await this.getMyFootprintStatsByCursorFallback({
+          begin,
+          end: normalizedEnd,
+          myWxid,
+          privateSessionIds,
+          groupSessionIds,
+          mentionLimit: mentionLimit > 0 ? mentionLimit : 600,
+          privateLimit: privateLimit > 0 ? privateLimit : 600,
+          onProgress: (current, total, scope) => report({
+            stage: 'fallback',
+            progress: 80 + Math.floor(current / Math.max(1, total) * 12),
+            message: scope === 'private'
+              ? `兼容模式读取私聊 ${current} / ${total}`
+              : `兼容模式读取群聊 ${current} / ${total}`,
+            current,
+            total
+          })
+        })
+        if (fallbackResult.success && fallbackResult.data) {
+          data = fallbackResult.data
+        }
+      }
+
+      if (data.private_sessions.length > 0 && data.private_sessions.length <= 120 && data.private_segments.length === 0) {
         const sessionsWithMessages = data.private_sessions.map(s => s.session_id)
         report({
           stage: 'segments',
@@ -10880,8 +10886,8 @@ class ChatService {
         sessionId,
         360,
         true,
-        0,
-        0
+        params.begin,
+        params.end
       )
       if (!cursorResult.success || !cursorResult.cursor) {
         throw new Error(cursorResult.error || `无法打开会话 ${sessionId} 的足迹分段游标`)
@@ -10933,7 +10939,13 @@ class ChatService {
             const isSend = this.resolveFootprintRowIsSend(row, params.myWxid)
 
             // 过滤时间范围外的消息
-            if (createTime > 0 && (createTime < params.begin || createTime > params.end)) {
+            if (
+              createTime > 0
+              && (
+                (params.begin > 0 && createTime < params.begin)
+                || (params.end > 0 && createTime > params.end)
+              )
+            ) {
               continue
             }
 
@@ -11447,7 +11459,7 @@ class ChatService {
       const lastTs = this.normalizeTimestampSeconds(sessionLastTsMap.get(normalizedSessionId) || 0)
       const known = hasSessionRank.has(normalizedSessionId)
       if (!known) return preferKeepUnknown || begin <= 0
-      if (begin > 0 && lastTs > 0 && lastTs < begin) return false
+      if (begin > 0 && (lastTs <= 0 || lastTs < begin)) return false
       return true
     }
     const push = (value: string) => {
@@ -12156,6 +12168,7 @@ class ChatService {
     privateLimit: number
     skipPrivateScan?: boolean
     mentionScanLimitPerGroup?: number
+    onProgress?: (current: number, total: number, scope: 'private' | 'group') => void
   }): Promise<{ success: boolean; data?: MyFootprintData; error?: string }> {
     const startedAt = Date.now()
     let truncated = false
@@ -12194,8 +12207,12 @@ class ChatService {
       const privateSessionGapSeconds = 10 * 60
       const mentionBatchSize = 360
       const skipPrivateScan = params.skipPrivateScan === true
+      const fallbackTotal = (skipPrivateScan ? 0 : params.privateSessionIds.length) + params.groupSessionIds.length
+      let fallbackCurrent = 0
 
       if (!skipPrivateScan) for (const sessionId of params.privateSessionIds) {
+        fallbackCurrent += 1
+        params.onProgress?.(fallbackCurrent, fallbackTotal, 'private')
         const cursorResult = await wcdbService.openMessageCursor(
           sessionId,
           privateBatchSize,
@@ -12366,7 +12383,93 @@ class ChatService {
         }
       }
 
-      for (const sessionId of params.groupSessionIds) {
+      // 全局消息搜索会一次完成所有分库定位，远快于逐个群聊打开游标。
+      // 搜索失败或底层结果缺少 source 字段时，再回退到原来的逐会话兼容路径。
+      let groupSearchHandled = params.groupSessionIds.length === 0
+      if (params.groupSessionIds.length > 0) {
+        try {
+          const groupSessionSet = new Set(params.groupSessionIds)
+          const searchLimit = Math.min(5000, Math.max(1200, params.mentionLimit * 6))
+          const searchResult = await wcdbService.searchMessages(
+            '@',
+            undefined,
+            searchLimit,
+            0,
+            params.begin,
+            params.end
+          )
+          if (searchResult.success && Array.isArray(searchResult.messages)) {
+            const candidateRows = (searchResult.messages as Array<Record<string, any>>).filter((row) => {
+              const sessionId = String(this.getRowField(row, [
+                '_session_id', 'session_id', 'sessionId', 'username', 'talker'
+              ]) || '').trim()
+              return groupSessionSet.has(sessionId)
+            })
+            const sourceCapable = candidateRows.length === 0 || candidateRows.some((row) => {
+              const source = row.source ?? row.msg_source ?? row.message_source
+              return source !== null && source !== undefined && String(source).trim().length > 0
+            })
+            if (sourceCapable) {
+              groupSearchHandled = true
+              const mentionIdentityKeys = new Set<string>()
+              for (const row of candidateRows) {
+                if (mentions.length >= params.mentionLimit) {
+                  truncated = true
+                  break
+                }
+                const sessionId = String(this.getRowField(row, [
+                  '_session_id', 'session_id', 'sessionId', 'username', 'talker'
+                ]) || '').trim()
+                const messageContentRaw = row.message_content ?? row.messageContent ?? row.content
+                if (!this.footprintMessageLikelyContainsAt(messageContentRaw)) continue
+                const sourceRaw = row.source ?? row.msg_source ?? row.message_source
+                if (!this.sourceAtUserListContainsWithIdentitySet(sourceRaw, mentionIdentitySet)) continue
+
+                const localId = this.toSafeInt(row.local_id ?? row.localId, 0)
+                const createTime = this.toSafeInt(row.create_time ?? row.createTime, 0)
+                const identityKey = `${sessionId}\u0001${localId}\u0001${createTime}`
+                if (mentionIdentityKeys.has(identityKey)) continue
+                mentionIdentityKeys.add(identityKey)
+
+                let senderUsername = String(row.sender_username || row.senderUsername || '').trim()
+                if (!senderUsername && row._db_path && row.real_sender_id) {
+                  senderUsername = await this.resolveMessageSenderUsernameById(
+                    String(row._db_path),
+                    row.real_sender_id
+                  ) || ''
+                }
+                const mention: MyFootprintMentionItem = {
+                  session_id: sessionId,
+                  local_id: localId,
+                  create_time: createTime,
+                  sender_username: senderUsername,
+                  message_content: String(row.message_content || row.messageContent || ''),
+                  source: this.normalizeFootprintSourceForOutput(sourceRaw)
+                }
+                mentions.push(mention)
+
+                const group = mentionGroupsMap.get(sessionId) || {
+                  session_id: sessionId,
+                  count: 0,
+                  latest_ts: 0
+                }
+                group.count += 1
+                if (mention.create_time > group.latest_ts) group.latest_ts = mention.create_time
+                mentionGroupsMap.set(sessionId, group)
+              }
+              if (candidateRows.length >= searchLimit) truncated = true
+              fallbackCurrent += params.groupSessionIds.length
+              params.onProgress?.(fallbackCurrent, fallbackTotal, 'group')
+            }
+          }
+        } catch {
+          groupSearchHandled = false
+        }
+      }
+
+      if (!groupSearchHandled) for (const sessionId of params.groupSessionIds) {
+        fallbackCurrent += 1
+        params.onProgress?.(fallbackCurrent, fallbackTotal, 'group')
         if (mentions.length >= params.mentionLimit) {
           truncated = true
           break
@@ -12534,7 +12637,7 @@ class ChatService {
       const usernames = Array.from(new Set([...sessionIds, ...senderUsernames]))
       if (usernames.length === 0) return data
 
-      const enrichResult = await this.enrichSessionsContactInfo(usernames)
+      const enrichResult = await this.enrichSessionsContactInfo(usernames, { skipAvatar: true })
       if (!enrichResult.success || !enrichResult.contacts) return data
       const contacts = enrichResult.contacts
 

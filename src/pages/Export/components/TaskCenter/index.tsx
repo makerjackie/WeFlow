@@ -1,11 +1,12 @@
 import React, { memo, useState } from 'react'
-import { AlertTriangle, Check, CheckCircle2, Copy, XCircle, Loader2, PlayCircle, PauseCircle, Trash2, StopCircle } from 'lucide-react'
+import { AlertTriangle, Check, CheckCircle2, Copy, FileText, FolderOpen, XCircle, Loader2, PlayCircle, PauseCircle, Trash2, StopCircle } from 'lucide-react'
 import type { ExportTask } from '../../types'
 import type { BackgroundTaskRecord } from '../../../../types/backgroundTask'
 import {
   backgroundTaskSourceLabels,
   backgroundTaskStatusLabels
 } from '../../constants'
+import { resolveTaskOpenDir } from '../../utils/progress'
 import './TaskCenter.scss'
 
 interface TaskCenterProps {
@@ -58,6 +59,7 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   ))
   const completedBackgroundTasks = backgroundTasks.filter(isBackgroundTaskSettled)
   const hasCompletedTasks = completedExportTasks.length > 0 || completedBackgroundTasks.length > 0
+  const hasRunningExportTask = exportTasks.some((task) => task.status === 'running' || task.status === 'cancel_requested')
 
   const handleClearCompletedTasks = () => {
     onClearCompletedExportTasks()
@@ -93,7 +95,10 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   return (
     <div className="task-center">
       <div className="task-center-header">
-        <h2 className="title">任务中心</h2>
+        <div className="task-center-title-wrap">
+          <h2 className="title">任务中心</h2>
+          {hasRunningExportTask && <span>切换页面会继续导出；完全退出应用会停止</span>}
+        </div>
         {hasCompletedTasks && (
           <button className="clear-btn" onClick={handleClearCompletedTasks}>
             <Trash2 size={14} /> 清理已完成
@@ -104,6 +109,9 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
       <div className="task-list">
         {/* Export Tasks */}
         {exportTasks.map(task => {
+          const outputPaths = Object.values(task.sessionOutputPaths || {}).map(path => String(path || '').trim()).filter(Boolean)
+          const primaryOutputPath = outputPaths[0] || ''
+          const canOpenResult = (task.status === 'success' || task.status === 'partial') && outputPaths.length > 0
           const hasMessageProgress = Number(task.progress.phaseTotal) > 0
           const phaseLabel = task.progress.phaseLabel || task.progress.phase
           const labelAlreadyHasCount = hasMessageProgress && /\d[\d,]*\s*\/\s*\d[\d,]*\s*条/.test(phaseLabel)
@@ -136,6 +144,32 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
                 </span>
               </div>
               <div className="task-actions">
+                {canOpenResult && outputPaths.length === 1 && (
+                  <button
+                    type="button"
+                    className="result-action-btn"
+                    onClick={() => void window.electronAPI.shell.openPath(primaryOutputPath)}
+                    title="打开导出的文件"
+                  >
+                    <FileText size={14} /> 打开文件
+                  </button>
+                )}
+                {canOpenResult && (
+                  <button
+                    type="button"
+                    className="result-action-btn"
+                    onClick={() => {
+                      if (outputPaths.length === 1) {
+                        void window.electronAPI.shell.showItemInFolder(primaryOutputPath)
+                      } else {
+                        void window.electronAPI.shell.openPath(resolveTaskOpenDir(task))
+                      }
+                    }}
+                    title={outputPaths.length === 1 ? '在文件夹中显示' : '打开导出文件夹'}
+                  >
+                    <FolderOpen size={14} /> 打开文件夹
+                  </button>
+                )}
                 {task.status === 'running' && (
                   <button className="action-btn cancel" onClick={() => onCancelExportTask(task.id)} title="取消任务">
                     <StopCircle size={16} />

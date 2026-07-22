@@ -4,6 +4,11 @@
 
 <h1 align="center">WeFlow</h1>
 
+> [!IMPORTANT]
+> **维护状态：已停止主动维护。** 本仓库仅保留源码与历史记录，`v5.0.10` 是最后一个维护版本；不再承诺适配后续微信或 macOS 更新，也不再提供日常构建。现有安装包仍可从 [GitHub Releases](https://github.com/makerjackie/WeFlow/releases/tag/v5.0.10) 或 [weflow.01mvp.com](https://weflow.01mvp.com) 下载。
+>
+> macOS 可能提示 WeFlow“访问其他 App 的数据”，这是因为它需要读取微信的本地容器数据。只在理解用途并信任当前安装包时授权；不建议仅为消除提示而授予“完全磁盘访问权限”。
+
 <p align="center">
   WeFlow 是一个<strong>完全本地</strong>的微信<strong>实时</strong>聊天记录查看、分析与导出工具。<br>
   它可以获取你的微信聊天记录并将其导出，还可以根据你的聊天记录为你生成独一无二的数据与年度报告。
@@ -13,9 +18,6 @@
   <a href="https://github.com/makerjackie/WeFlow/stargazers"><img src="https://img.shields.io/github/stars/makerjackie/WeFlow?style=flat&label=Stars&labelColor=2A3B4C&color=60A5FA" alt="Stargazers"></a>
   <a href="https://github.com/makerjackie/WeFlow/network/members"><img src="https://img.shields.io/github/forks/makerjackie/WeFlow?style=flat&label=Forks&labelColor=2A3B4C&color=60A5FA" alt="Forks"></a>
   <a href="https://github.com/makerjackie/WeFlow/releases"><img src="https://img.shields.io/github/downloads/makerjackie/WeFlow/total?style=flat&label=Downloads&labelColor=2A3B4C&color=60A5FA" alt="Downloads"></a>
-  <br><br>
-  <a href="https://t.me/weflow_cc"><img src="https://img.shields.io/badge/Telegram-频道-60A5FA?style=flat&logo=telegram&logoColor=white&labelColor=2A3B4C&color=60A5FA" alt="Telegram Channel" style="height: 24px; vertical-align: middle;"></a>
-  <a href="https://star-history.com/#makerjackie/WeFlow"><img src="https://api.star-history.com/badge?repo=makerjackie/WeFlow&theme=dark" alt="Star History Rank" style="height: 30px; vertical-align: middle;"></a>
 </p>
 
 > [!TIP]
@@ -77,9 +79,9 @@ WeFlow 提供本地 HTTP API 服务，支持通过接口查询消息数据，可
 
 完整接口文档：[点击查看](docs/HTTP-API.md)
 
-## 面向开发者
+## 源码留档
 
-如果你想从源码构建或为项目贡献代码，请遵循以下步骤：
+仓库不再主动维护。若需要复现最后的开发环境，可执行：
 
 ```bash
 # 1. 克隆项目到本地
@@ -97,28 +99,6 @@ npm run dev
 
 - [密语 CipherTalk](https://github.com/ILoveBingLu/miyu) 为本项目提供了基础框架
 - [WeChat-Channels-Video-File-Decryption](https://github.com/Evil0ctal/WeChat-Channels-Video-File-Decryption) 提供了视频解密相关的技术参考
-
-## 推广与合作
-
-如果您对 **WeFlow** 有兴趣，或者希望与我们展开深度合作或投放你的广告，欢迎随时通过邮件取得联系。我们非常期待与各位创作者、开发者及合作伙伴共同探索。
-
-### 联系方式
-
-欢迎发送邮件至：
-原作者已删除，为保护作者隐私隐藏
-
-## 合作伙伴
-
-我们非常欢迎优秀的开源社区项目团队或其他团队与我们建立长期合作关系。期待与 WeFlow 携手并进，共同建设更开放的生态！
-
-<p align="center">
-  <!-- 是的你没看错这里还是占位！
-  <a href="https://your-partner-website.com" target="_blank">
-    <img src="https://via.placeholder.com/150x50?text=Partner+1+Logo" alt="Partner Name" width="150" style="margin: 10px; vertical-align: middle;" />
-  </a> -->
-</p>
-
----
 
 ## 贡献者
 

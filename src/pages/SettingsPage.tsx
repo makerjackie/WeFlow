@@ -324,9 +324,6 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [aiInsightScanIntervalHours, setAiInsightScanIntervalHours] = useState(4)
   const [aiInsightContextCount, setAiInsightContextCount] = useState(40)
   const [aiInsightSystemPrompt, setAiInsightSystemPrompt] = useState('')
-  const [aiInsightTelegramEnabled, setAiInsightTelegramEnabled] = useState(false)
-  const [aiInsightTelegramToken, setAiInsightTelegramToken] = useState('')
-  const [aiInsightTelegramChatIds, setAiInsightTelegramChatIds] = useState('')
   const [aiInsightAllowSocialContext, setAiInsightAllowSocialContext] = useState(false)
   const [aiInsightSocialContextCount, setAiInsightSocialContextCount] = useState(3)
   const [aiInsightWeiboCookie, setAiInsightWeiboCookie] = useState('')
@@ -604,9 +601,6 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const savedAiInsightScanIntervalHours = await configService.getAiInsightScanIntervalHours()
       const savedAiInsightContextCount = await configService.getAiInsightContextCount()
       const savedAiInsightSystemPrompt = await configService.getAiInsightSystemPrompt()
-      const savedAiInsightTelegramEnabled = await configService.getAiInsightTelegramEnabled()
-      const savedAiInsightTelegramToken = await configService.getAiInsightTelegramToken()
-      const savedAiInsightTelegramChatIds = await configService.getAiInsightTelegramChatIds()
       const savedAiInsightAllowSocialContext = await configService.getAiInsightAllowSocialContext()
       const savedAiInsightSocialContextCount = await configService.getAiInsightSocialContextCount()
       const savedAiInsightWeiboCookie = await configService.getAiInsightWeiboCookie()
@@ -637,9 +631,6 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       setAiInsightScanIntervalHours(savedAiInsightScanIntervalHours)
       setAiInsightContextCount(savedAiInsightContextCount)
       setAiInsightSystemPrompt(savedAiInsightSystemPrompt)
-      setAiInsightTelegramEnabled(savedAiInsightTelegramEnabled)
-      setAiInsightTelegramToken(savedAiInsightTelegramToken)
-      setAiInsightTelegramChatIds(savedAiInsightTelegramChatIds)
       setAiInsightAllowSocialContext(savedAiInsightAllowSocialContext)
       setAiInsightSocialContextCount(savedAiInsightSocialContextCount)
       setAiInsightWeiboCookie(savedAiInsightWeiboCookie)
@@ -1961,7 +1952,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
         <div className="form-group">
           <label>AI 见解消息通知</label>
-          <span className="form-hint">仅控制 AI 见解弹窗，不影响新消息通知、会话过滤或 Telegram 推送</span>
+          <span className="form-hint">仅控制 AI 见解弹窗，不影响新消息通知或会话过滤</span>
           <div className="log-toggle-line">
             <span className="log-status">{aiInsightNotificationEnabled ? '已开启' : '已关闭'}</span>
             <label className="switch" htmlFor="ai-insight-notification-enabled-toggle">
@@ -3756,66 +3747,6 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
       <div className="divider" />
 
-      {/* Telegram 推送 */}
-      <div className="form-group">
-        <label>Telegram Bot 推送</label>
-        <span className="form-hint">
-          开启后，见解同时推送到指定 Telegram 用户/群组，方便手机即时收到通知。需要先创建 Bot 并获取 Token（通过 @BotFather），Chat ID 可通过 @userinfobot 获取，多个 ID 用英文逗号分隔。
-        </span>
-        <div className="log-toggle-line">
-          <span className="log-status">{aiInsightTelegramEnabled ? '已启用' : '未启用'}</span>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={aiInsightTelegramEnabled}
-              onChange={async (e) => {
-                const val = e.target.checked
-                setAiInsightTelegramEnabled(val)
-                await configService.setAiInsightTelegramEnabled(val)
-              }}
-            />
-            <span className="switch-slider" />
-          </label>
-        </div>
-      </div>
-
-      {aiInsightTelegramEnabled && (
-        <>
-          <div className="form-group">
-            <label>Bot Token</label>
-            <input
-              type="password"
-              className="field-input"
-              style={{ width: '100%' }}
-              placeholder="在此处填入你的 Telegram Bot Token"
-              value={aiInsightTelegramToken}
-              onChange={(e) => {
-                const val = e.target.value
-                setAiInsightTelegramToken(val)
-                scheduleConfigSave('aiInsightTelegramToken', () => configService.setAiInsightTelegramToken(val))
-              }}
-            />
-          </div>
-          <div className="form-group">
-            <label>Chat ID（支持英文逗号分隔多个）</label>
-            <input
-              type="text"
-              className="field-input"
-              style={{ width: '100%' }}
-              placeholder="123456789, -987654321"
-              value={aiInsightTelegramChatIds}
-              onChange={(e) => {
-                const val = e.target.value
-                setAiInsightTelegramChatIds(val)
-                scheduleConfigSave('aiInsightTelegramChatIds', () => configService.setAiInsightTelegramChatIds(val))
-              }}
-            />
-          </div>
-        </>
-      )}
-
-      <div className="divider" />
-
       {/* 对话过滤名单 */}
       {(() => {
         const selectableSessions = sessionFilterOptions.filter((session) =>
@@ -4459,7 +4390,7 @@ JSON 输出格式：
             <div className="form-group">
               <label>消息深度解析</label>
               <span className="form-hint">
-                开启后，在聊天页悬停对方文本消息时显示深度解析入口。点击后按需调用 AI，解析结果会保存到灵感信箱。
+                开启后，在聊天页悬停对方文本消息时显示深度解析入口。点击后按需调用 AI，结果会保存在本地记录中。
               </span>
               <div className="log-toggle-line">
                 <span className="log-status">{aiMessageInsightEnabled ? '已开启' : '已关闭'}</span>
@@ -5679,8 +5610,6 @@ JSON 输出格式：
 }
 
 export default SettingsPage
-
-
 
 
 

@@ -122,12 +122,6 @@ interface ConfigSchema {
   aiInsightContextCount: number
   /** 自定义 system prompt，空字符串表示使用内置默认值 */
   aiInsightSystemPrompt: string
-  /** 是否启用 Telegram 推送 */
-  aiInsightTelegramEnabled: boolean
-  /** Telegram Bot Token */
-  aiInsightTelegramToken: string
-  /** Telegram 接收 Chat ID，逗号分隔，支持多个 */
-  aiInsightTelegramChatIds: string
 
   // AI 足迹
   aiFootprintEnabled: boolean
@@ -267,9 +261,6 @@ export class ConfigService {
       aiInsightContextCount: 40,
       aiInsightSocialContextCount: 3,
       aiInsightSystemPrompt: '',
-      aiInsightTelegramEnabled: false,
-      aiInsightTelegramToken: '',
-      aiInsightTelegramChatIds: '',
       aiInsightWeiboCookie: '',
       aiInsightWeiboBindings: {},
       aiFootprintEnabled: false,
@@ -317,9 +308,29 @@ export class ConfigService {
     }
     this.migrateAuthFields()
     this.migrateAiConfig()
+    this.removeRetiredTelegramConfig()
     if (!runningInWorker) {
       this.cacheMapStore = new CacheMapStore(this.getUserDataPath())
       this.migrateCacheMapKeys()
+    }
+  }
+
+  /** Telegram 推送已移除；同步清理旧版本遗留的 Bot 凭据。 */
+  private removeRetiredTelegramConfig(): void {
+    const retiredKeys = [
+      'aiInsightTelegramEnabled',
+      'aiInsightTelegramToken',
+      'aiInsightTelegramChatIds'
+    ]
+    const all = this.store.store as unknown as Record<string, unknown>
+    let changed = false
+    for (const key of retiredKeys) {
+      if (!(key in all)) continue
+      delete all[key]
+      changed = true
+    }
+    if (changed) {
+      ;(this.store as any).store = all
     }
   }
 

@@ -1704,24 +1704,6 @@ ${afterText}
         insightLog('INFO', `AI 见解消息通知已关闭，跳过应用通知 → ${resolvedDisplayName}: ${insight}`)
       }
 
-      // 渠道二：Telegram Bot 推送（可选）
-      const telegramEnabled = this.config.get('aiInsightTelegramEnabled') as boolean
-      if (telegramEnabled) {
-        const telegramToken = (this.config.get('aiInsightTelegramToken') as string) || ''
-        const telegramChatIds = (this.config.get('aiInsightTelegramChatIds') as string) || ''
-        if (telegramToken && telegramChatIds) {
-          const chatIds = telegramChatIds.split(',').map((s) => s.trim()).filter(Boolean)
-          const telegramText = `【WeFlow】 ${notifTitle}\n\n${insight}`
-          for (const chatId of chatIds) {
-            this.sendTelegram(telegramToken, chatId, telegramText).catch((e) => {
-              insightLog('WARN', `Telegram 推送失败 (chatId=${chatId}): ${(e as Error).message}`)
-            })
-          }
-        } else {
-          insightLog('WARN', 'Telegram 已启用但 Token 或 Chat ID 未填写，跳过')
-        }
-      }
-
       insightLog('INFO', `已完成 ${resolvedDisplayName} 的见解处理`)
       this.recordTrigger(sessionId)
       return {
@@ -1744,45 +1726,6 @@ ${afterText}
     }
   }
 
-  /**
-   * 通过 Telegram Bot API 发送消息。
-   * 使用 Node 原生 https 模块，无需第三方依赖。
-   */
-  private sendTelegram(token: string, chatId: string, text: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const body = JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' })
-      const options = {
-        hostname: 'api.telegram.org',
-        port: 443,
-        path: `/bot${token}/sendMessage`,
-        method: 'POST' as const,
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body).toString()
-        }
-      }
-      const req = https.request(options, (res) => {
-        let data = ''
-        res.on('data', (chunk) => { data += chunk })
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(data)
-            if (parsed.ok) {
-              resolve()
-            } else {
-              reject(new Error(parsed.description || '未知错误'))
-            }
-          } catch {
-            reject(new Error(`响应解析失败: ${data.slice(0, 100)}`))
-          }
-        })
-      })
-      req.setTimeout(15_000, () => { req.destroy(); reject(new Error('Telegram 请求超时')) })
-      req.on('error', reject)
-      req.write(body)
-      req.end()
-    })
-  }
 }
 
 export const insightService = new InsightService()

@@ -114,9 +114,6 @@ export const CONFIG_KEYS = {
   AI_INSIGHT_CONTEXT_COUNT: 'aiInsightContextCount',
   AI_INSIGHT_SOCIAL_CONTEXT_COUNT: 'aiInsightSocialContextCount',
   AI_INSIGHT_SYSTEM_PROMPT: 'aiInsightSystemPrompt',
-  AI_INSIGHT_TELEGRAM_ENABLED: 'aiInsightTelegramEnabled',
-  AI_INSIGHT_TELEGRAM_TOKEN: 'aiInsightTelegramToken',
-  AI_INSIGHT_TELEGRAM_CHAT_IDS: 'aiInsightTelegramChatIds',
   AI_INSIGHT_WEIBO_COOKIE: 'aiInsightWeiboCookie',
   AI_INSIGHT_WEIBO_BINDINGS: 'aiInsightWeiboBindings',
 
@@ -2159,33 +2156,6 @@ export async function getAiInsightSystemPrompt(): Promise<string> {
 
 export async function setAiInsightSystemPrompt(prompt: string): Promise<void> {
   await config.set(CONFIG_KEYS.AI_INSIGHT_SYSTEM_PROMPT, prompt)
-}
-
-export async function getAiInsightTelegramEnabled(): Promise<boolean> {
-  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_TELEGRAM_ENABLED)
-  return value === true
-}
-
-export async function setAiInsightTelegramEnabled(enabled: boolean): Promise<void> {
-  await config.set(CONFIG_KEYS.AI_INSIGHT_TELEGRAM_ENABLED, enabled)
-}
-
-export async function getAiInsightTelegramToken(): Promise<string> {
-  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_TELEGRAM_TOKEN)
-  return typeof value === 'string' ? value : ''
-}
-
-export async function setAiInsightTelegramToken(token: string): Promise<void> {
-  await config.set(CONFIG_KEYS.AI_INSIGHT_TELEGRAM_TOKEN, token)
-}
-
-export async function getAiInsightTelegramChatIds(): Promise<string> {
-  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_TELEGRAM_CHAT_IDS)
-  return typeof value === 'string' ? value : ''
-}
-
-export async function setAiInsightTelegramChatIds(chatIds: string): Promise<void> {
-  await config.set(CONFIG_KEYS.AI_INSIGHT_TELEGRAM_CHAT_IDS, chatIds)
 }
 
 export async function getAiInsightWeiboCookie(): Promise<string> {

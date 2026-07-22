@@ -996,7 +996,7 @@ const handleNotificationClickNavigation = (payload: unknown): void => {
       return
     }
     if (data.channel === 'ai-insight' && data.insightRecordId) {
-      focusMainWindowAndNavigateRoute(`/insight-inbox?recordId=${encodeURIComponent(String(data.insightRecordId))}`)
+      focusMainWindowAndNavigate(String(data.sessionId || ''))
       return
     }
     focusMainWindowAndNavigate(String(data.sessionId || ''))
